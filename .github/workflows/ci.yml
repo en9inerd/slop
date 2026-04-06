@@ -27,7 +27,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.15.2
 
       - name: Build
         run: zig build
@@ -98,7 +98,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.15.2
 
       - name: Build cross-platform binaries and .deb packages
         env:
