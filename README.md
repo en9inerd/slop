@@ -1128,13 +1128,11 @@ zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-musl
 # macOS
 zig build -Doptimize=ReleaseFast -Dtarget=x86_64-macos
 zig build -Doptimize=ReleaseFast -Dtarget=aarch64-macos
-
-# Windows
-zig build -Doptimize=ReleaseFast -Dtarget=x86_64-windows-gnu
-zig build -Doptimize=ReleaseFast -Dtarget=aarch64-windows-gnu
 ```
 
 All targets produce a single static binary with no runtime dependencies.
+
+> **Note:** Windows is not supported — the tool relies on POSIX APIs (`popen`, `strdup`) for git integration and file walking.
 
 ## Calibration
 
@@ -1637,8 +1635,6 @@ Bayesian approach with Gaussian signals emerges AFTER calibration.
 build.zig          Zig build system (sole build backend)
 build.zig.zon      Zig package manifest (zlib dependency for cross-compilation)
 Makefile           Thin wrapper — all targets delegate to zig build
-PLAN.md            Detailed design document with full math and rationale
-
 src/
   slop.h            Public header: types, constants, thresholds, API (473 lines)
   main.c           CLI entry point, arg parsing, output formatting (1435 lines)

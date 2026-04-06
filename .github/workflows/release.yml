@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    branches:
-      - master
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -34,40 +34,32 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.14.1
 
-      - name: Semantic Release
-        id: semrel
-        uses: go-semantic-release/action@v1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          allow-initial-development-versions: true
+      - name: Extract version from tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build cross-platform binaries and .deb packages
-        if: steps.semrel.outputs.version != ''
         env:
-          VERSION: ${{ steps.semrel.outputs.version }}
+          VERSION: ${{ steps.version.outputs.value }}
         run: bash ./scripts/build.sh
 
       - name: Upload release assets
-        if: steps.semrel.outputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          tag_name: v${{ steps.semrel.outputs.version }}
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update Homebrew formula
-        if: steps.semrel.outputs.version != ''
         env:
-          VERSION: ${{ steps.semrel.outputs.version }}
+          VERSION: ${{ steps.version.outputs.value }}
           TAP_REPO_TOKEN: ${{ secrets.TAP_REPO_TOKEN }}
         run: |
           REPO="en9inerd/slop"

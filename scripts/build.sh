@@ -14,8 +14,6 @@ targets=(
   "aarch64-linux-musl"
   "x86_64-macos"
   "aarch64-macos"
-  "x86_64-windows-gnu"
-  "aarch64-windows-gnu"
 )
 
 deb_arch_map() {
@@ -30,11 +28,7 @@ for target in "${targets[@]}"; do
   echo "Building slop for $target (v$VERSION)"
   zig build -Doptimize=ReleaseFast -Dtarget="$target"
 
-  if [[ "$target" == *windows* ]]; then
-    cp zig-out/bin/slop.exe "$DIST_DIR/slop_${target}.exe"
-  else
-    cp zig-out/bin/slop "$DIST_DIR/slop_${target}"
-  fi
+  cp zig-out/bin/slop "$DIST_DIR/slop_${target}"
 
   deb_arch=$(deb_arch_map "$target")
   if [[ -n "$deb_arch" ]]; then

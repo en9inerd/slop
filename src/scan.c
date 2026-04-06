@@ -87,7 +87,11 @@ static void ident_set_insert(IdentSet *is, const char *word, int wlen) {
     for (int probe = 0; probe < is->cap; probe++) {
         int idx = (int)((h + (uint32_t)probe) % (uint32_t)is->cap);
         if (!is->slots[idx]) {
-            is->slots[idx] = strndup(word, (size_t)wlen);
+            char *copy = malloc((size_t)wlen + 1);
+            if (!copy) return;
+            memcpy(copy, word, (size_t)wlen);
+            copy[wlen] = '\0';
+            is->slots[idx] = copy;
             is->count++;
             return;
         }
