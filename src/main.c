@@ -1605,6 +1605,9 @@ int main(int argc, char **argv) {
     rc = cmd_dupes(argc, argv);
   } else if (strcmp(cmd, "calibrate") == 0) {
     rc = cmd_calibrate(argc, argv);
+  } else if (strcmp(cmd, "--version") == 0 || strcmp(cmd, "-V") == 0) {
+    printf("slop %s\n", SLOP_VERSION);
+    return 0;
   } else if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0 ||
              strcmp(cmd, "help") == 0) {
     usage();

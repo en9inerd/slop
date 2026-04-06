@@ -41,6 +41,7 @@ fn linkZlib(mod: *std.Build.Module, b: *std.Build, target: std.Build.ResolvedTar
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const version = b.option([]const u8, "version", "Version string") orelse "dev";
 
     // ── Static library (libsad.a) ────────────────────────────
     const lib = b.addLibrary(.{
@@ -74,6 +75,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    exe.root_module.addCMacro("SLOP_VERSION", b.fmt("\"{s}\"", .{version}));
     exe.root_module.addCSourceFiles(.{
         .root = b.path(""),
         .files = &.{"src/main.c"},

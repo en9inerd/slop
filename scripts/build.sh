@@ -26,7 +26,7 @@ deb_arch_map() {
 
 for target in "${targets[@]}"; do
   echo "Building slop for $target (v$VERSION)"
-  zig build -Doptimize=ReleaseFast -Dtarget="$target"
+  zig build -Doptimize=ReleaseFast -Dtarget="$target" -Dversion="$VERSION"
 
   cp zig-out/bin/slop "$DIST_DIR/slop_${target}"
 
