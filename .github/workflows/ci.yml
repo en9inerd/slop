@@ -8,6 +8,9 @@ on:
     branches:
       - master
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,6 +18,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
@@ -26,3 +31,49 @@ jobs:
 
       - name: Run tests
         run: zig build test
+
+      - name: Auto-tag release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          major=$(echo "$last_tag" | sed 's/v//' | cut -d. -f1)
+          minor=$(echo "$last_tag" | sed 's/v//' | cut -d. -f2)
+          patch=$(echo "$last_tag" | sed 's/v//' | cut -d. -f3)
+
+          bump="none"
+          for msg in $(git log "$last_tag"..HEAD --pretty=format:"%s" 2>/dev/null); do
+            case "$msg" in
+              feat!:*|*BREAKING\ CHANGE*) bump="major" ; break ;;
+            esac
+          done
+
+          if [ "$bump" != "major" ]; then
+            for msg in $(git log "$last_tag"..HEAD --pretty=format:"%s" 2>/dev/null); do
+              case "$msg" in
+                feat:*|feat\(*) bump="minor" ; break ;;
+              esac
+            done
+          fi
+
+          if [ "$bump" = "none" ]; then
+            has_fix=$(git log "$last_tag"..HEAD --pretty=format:"%s" 2>/dev/null | grep -c '^fix' || true)
+            if [ "$has_fix" -gt 0 ]; then
+              bump="patch"
+            fi
+          fi
+
+          if [ "$bump" = "none" ]; then
+            echo "No version bump needed"
+            exit 0
+          fi
+
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          new_tag="v${major}.${minor}.${patch}"
+          echo "Bumping $last_tag -> $new_tag ($bump)"
+          git tag "$new_tag"
+          git push origin "$new_tag"
