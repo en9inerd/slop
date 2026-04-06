@@ -190,7 +190,7 @@ printf '// only comments\n// nothing else\n' > /tmp/slop_ec_comments.ts
 run "$SLOP" scan /tmp/slop_ec_comments.ts
 check_contains "all-comments insufficient" "insufficient code"
 
-printf '\x00\x01\x02' > /tmp/slop_ec_binary.ts
+printf '\000\001\002' > /tmp/slop_ec_binary.ts
 run "$SLOP" scan /tmp/slop_ec_binary.ts
 check_contains "binary file skipped" "skipped"
 
