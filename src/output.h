@@ -29,6 +29,7 @@ typedef struct {
   double prob;
   double raw_score;
   int dead_lines;
+  int code_lines;
   ScoreResult sc;
 } FileEntry;
 

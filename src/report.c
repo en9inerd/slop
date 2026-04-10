@@ -194,6 +194,7 @@ int cmd_report(int argc, char **argv) {
         r->prob = ctx.sc.probability;
         r->raw_score = ctx.sc.raw_score;
         r->dead_lines = ctx.dead_lines;
+        r->code_lines = ctx.scan.code_lines;
       }
       total_dead += ctx.dead_lines;
       total_smells += smell.count;
@@ -232,9 +233,19 @@ int cmd_report(int argc, char **argv) {
       free(content);
     }
 
+    double weight_sum = 0, prob_sum = 0;
+    for (int i = 0; i < row_count; i++) {
+      double w = rows[i].code_lines > 0 ? (double)rows[i].code_lines : 1.0;
+      prob_sum += rows[i].prob * w;
+      weight_sum += w;
+    }
+    double project_prob = weight_sum > 0 ? prob_sum / weight_sum : 0;
+
     report_header("SUMMARY");
     print_file_table(rows, row_count);
-    printf("\n  %d sloppy / %d moderate / %d clean\n", sloppy, moderate, clean);
+    printf("\n  project score = %.1f / 10   [%s]\n",
+           slop_score_10(project_prob), score_label(project_prob));
+    printf("  %d sloppy / %d moderate / %d clean\n", sloppy, moderate, clean);
     printf("  %d total findings / %d dead lines across project\n", total_smells,
            total_dead);
     if (drr.ratio > 0)

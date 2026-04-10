@@ -208,12 +208,21 @@ static int cmd_scan(int argc, char **argv) {
         e->prob = ctx.sc.probability;
         e->raw_score = ctx.sc.raw_score;
         e->dead_lines = ctx.dead_lines;
+        e->code_lines = ctx.scan.code_lines;
         e->sc = ctx.sc;
       }
 
       scan_one_free(&ctx);
       free(content);
     }
+
+    double weight_sum = 0, prob_sum = 0;
+    for (int i = 0; i < entry_count; i++) {
+      double w = entries[i].code_lines > 0 ? (double)entries[i].code_lines : 1.0;
+      prob_sum += entries[i].prob * w;
+      weight_sum += w;
+    }
+    double project_prob = weight_sum > 0 ? prob_sum / weight_sum : 0;
 
     if (!verbose && !json_out && entry_count > 0) {
       qsort(entries, (size_t)entry_count, sizeof(FileEntry), entry_cmp);
@@ -229,7 +238,9 @@ static int cmd_scan(int argc, char **argv) {
         total_dead += entries[i].dead_lines;
 
       print_file_table(entries, entry_count);
-      printf("\n  %d sloppy / %d moderate / %d clean\n", ss.sloppy, ss.moderate,
+      printf("\n  project score = %.1f / 10   [%s]\n",
+             slop_score_10(project_prob), score_label(project_prob));
+      printf("  %d sloppy / %d moderate / %d clean\n", ss.sloppy, ss.moderate,
              ss.clean);
       if (total_dead > 0)
         printf("  %d dead lines detected across project\n", total_dead);
@@ -238,6 +249,7 @@ static int cmd_scan(int argc, char **argv) {
     if (json_out) {
       printf("{\n  \"calibrated\": %s,\n  \"temperature\": %.2f,\n",
              cal.loaded ? "true" : "false", cal.temperature);
+      printf("  \"project_score\": %.1f,\n", slop_score_10(project_prob));
       printf("  \"dup_ratio\": %.4f,\n  \"files\": [\n", dup_ratio);
       for (int i = 0; i < entry_count; i++) {
         print_score_json(entries[i].path, &entries[i].sc,
