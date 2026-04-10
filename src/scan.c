@@ -1,4 +1,4 @@
-#include "slop.h"
+#include "scan_util.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,105 +18,7 @@ typedef struct {
 
 #define MAX_BLOCK_DEPTH 64
 
-/* ── Narration markers ──────────────────────────────────── */
-
-static const char *narration_markers[] = {
-    "first we", "first,",  "now we", "now,",       "now let",  "next we",
-    "next,",    "then we", "then,",  "finally we", "finally,", "here we",
-    "here,",    "let's",   "let me", "we need to", "we can ",  "we'll",
-    "we will",  "step 1",  "step 2", "step 3",     nullptr};
-
-/* ── Keywords for filtering ─────────────────────────────── */
-
-static const char *all_keywords[] = {
-    "auto",      "break",    "case",       "catch",   "char",
-    "class",     "const",    "continue",   "default", "do",
-    "double",    "else",     "enum",       "extern",  "false",
-    "float",     "for",      "goto",       "if",      "int",
-    "long",      "new",      "null",       "private", "protected",
-    "public",    "register", "return",     "short",   "signed",
-    "sizeof",    "static",   "struct",     "super",   "switch",
-    "this",      "throw",    "true",       "try",     "typedef",
-    "typeof",    "union",    "unsigned",   "var",     "void",
-    "volatile",  "while",    "async",      "await",   "delete",
-    "export",    "extends",  "finally",    "from",    "function",
-    "import",    "in",       "instanceof", "let",     "of",
-    "undefined", "yield",    "chan",       "defer",   "fallthrough",
-    "func",      "go",       "interface",  "map",     "package",
-    "range",     "select",   "type",       "as",      "crate",
-    "dyn",       "fn",       "impl",       "loop",    "match",
-    "mod",       "move",     "mut",        "pub",     "ref",
-    "self",      "trait",    "unsafe",     "use",     "where",
-    "def",       "elif",     "except",     "global",  "lambda",
-    "nonlocal",  "pass",     "raise",      "with",    nullptr};
-
-/* ── Generic identifier dictionary (AI naming signal) ───── */
-
-static const char *generic_names[] = {
-    "data",      "result",     "response", "handler",   "value",
-    "item",      "config",     "options",  "params",    "callback",
-    "output",    "input",      "temp",     "tmp",       "ret",
-    "res",       "val",        "obj",      "arr",       "args",
-    "opts",      "payload",    "instance", "container", "wrapper",
-    "helper",    "util",       "manager",  "service",   "controller",
-    "processor", "middleware", "utils",    "helpers",   "entries",
-    "items",     "values",     "results",  "responses", nullptr};
-
-static bool is_generic_name(const char *word) {
-  for (int i = 0; generic_names[i]; i++)
-    if (strcmp(word, generic_names[i]) == 0)
-      return true;
-  return false;
-}
-
-/* ── Simple hash set for unique identifier counting (TTR) ── */
-
-typedef struct {
-  char **slots;
-  int cap;
-  int count;
-} IdentSet;
-
-static uint32_t fnv1a(const char *s, int len) {
-  uint32_t h = 2166136261u;
-  for (int i = 0; i < len; i++)
-    h = (h ^ (uint8_t)s[i]) * 16777619u;
-  return h;
-}
-
-static IdentSet ident_set_new(int cap) {
-  IdentSet is = {.cap = cap, .count = 0};
-  is.slots = calloc((size_t)cap, sizeof(char *));
-  return is;
-}
-
-static void ident_set_insert(IdentSet *is, const char *word, int wlen) {
-  uint32_t h = fnv1a(word, wlen);
-  for (int probe = 0; probe < is->cap; probe++) {
-    int idx = (int)((h + (uint32_t)probe) % (uint32_t)is->cap);
-    if (!is->slots[idx]) {
-      char *copy = malloc((size_t)wlen + 1);
-      if (!copy)
-        return;
-      memcpy(copy, word, (size_t)wlen);
-      copy[wlen] = '\0';
-      is->slots[idx] = copy;
-      is->count++;
-      return;
-    }
-    if (strncmp(is->slots[idx], word, (size_t)wlen) == 0 &&
-        is->slots[idx][wlen] == '\0')
-      return;
-  }
-}
-
-static void ident_set_free(IdentSet *is) {
-  for (int i = 0; i < is->cap; i++)
-    free(is->slots[i]);
-  free(is->slots);
-}
-
-/* ── Function close helper (used by scanner in 4 places) ── */
+/* ── Function close helper ──────────────────────────────── */
 
 typedef struct {
   ScanResult *res;
@@ -152,402 +54,6 @@ static void close_current_function(FuncCloseCtx *ctx) {
     }
   }
   *ctx->in_func = false;
-}
-
-/* ── Helpers ────────────────────────────────────────────── */
-
-static bool starts_with_ci(const char *s, int slen, const char *prefix) {
-  int plen = (int)strlen(prefix);
-  if (slen < plen)
-    return false;
-  for (int i = 0; i < plen; i++) {
-    if (tolower((unsigned char)s[i]) != tolower((unsigned char)prefix[i]))
-      return false;
-  }
-  return true;
-}
-
-static bool is_word_char(char c) {
-  return isalnum((unsigned char)c) || c == '_';
-}
-
-static int extract_word(const char *s, const char *end, char *buf, int bufsz) {
-  int i = 0;
-  while (s + i < end && i < bufsz - 1 && is_word_char(s[i])) {
-    buf[i] = s[i];
-    i++;
-  }
-  buf[i] = '\0';
-  return i;
-}
-
-static bool is_keyword(const char *word) {
-  for (int i = 0; all_keywords[i]; i++)
-    if (strcmp(word, all_keywords[i]) == 0)
-      return true;
-  return false;
-}
-
-static bool is_camel_case(const char *s, int len) {
-  if (len <= 2 || !islower((unsigned char)s[0]))
-    return false;
-  for (int i = 1; i < len; i++)
-    if (isupper((unsigned char)s[i]))
-      return true;
-  return false;
-}
-
-static bool is_snake_case(const char *s, int len) {
-  if (len <= 2)
-    return false;
-  bool has_us = false;
-  for (int i = 0; i < len; i++) {
-    if (s[i] == '_')
-      has_us = true;
-    else if (!islower((unsigned char)s[i]) && !isdigit((unsigned char)s[i]))
-      return false;
-  }
-  return has_us;
-}
-
-static bool is_all_upper(const char *s, int len) {
-  for (int i = 0; i < len; i++)
-    if (islower((unsigned char)s[i]))
-      return false;
-  return true;
-}
-
-static bool line_has_paren(const char *line, int len) {
-  for (int i = 0; i < len; i++)
-    if (line[i] == '(')
-      return true;
-  return false;
-}
-
-static bool line_starts_control(const char *line, int len) {
-  int i = 0;
-  while (i < len && isspace((unsigned char)line[i]))
-    i++;
-  const char *kw[] = {"if", "else", "for", "while", "switch", "do", nullptr};
-  for (int k = 0; kw[k]; k++) {
-    int kl = (int)strlen(kw[k]);
-    if (i + kl <= len && memcmp(line + i, kw[k], (size_t)kl) == 0 &&
-        (i + kl >= len || !is_word_char(line[i + kl])))
-      return true;
-  }
-  return false;
-}
-
-static void extract_func_name(const char *line, int len, char *out, int outsz) {
-  /*
-   * Find the LAST '(' that has an identifier before it.
-   * This handles Go method receivers: func (s *Server) Handle(req)
-   * where the first '(' is the receiver and the last is the real signature.
-   */
-  int best_start = -1, best_end = -1;
-  for (int p = 0; p < len; p++) {
-    if (line[p] != '(')
-      continue;
-    int e = p - 1;
-    while (e >= 0 && isspace((unsigned char)line[e]))
-      e--;
-    if (e < 0 || !is_word_char(line[e]))
-      continue;
-    int s = e;
-    while (s > 0 && is_word_char(line[s - 1]))
-      s--;
-    /* skip if the "name" is a keyword like func/if/for */
-    char tmp[128];
-    int tl = e - s + 1;
-    if (tl > 0 && tl < (int)sizeof(tmp)) {
-      memcpy(tmp, line + s, (size_t)tl);
-      tmp[tl] = '\0';
-      if (strcmp(tmp, "func") == 0 || strcmp(tmp, "if") == 0 ||
-          strcmp(tmp, "for") == 0 || strcmp(tmp, "while") == 0 ||
-          strcmp(tmp, "switch") == 0)
-        continue;
-    }
-    best_start = s;
-    best_end = e;
-  }
-  if (best_start < 0) {
-    out[0] = '\0';
-    return;
-  }
-
-  int n = best_end - best_start + 1;
-  if (n <= 0) {
-    out[0] = '\0';
-    return;
-  }
-  if (n >= outsz)
-    n = outsz - 1;
-  memcpy(out, line + best_start, (size_t)n);
-  out[n] = '\0';
-}
-
-/* ── Python function detection helpers ──────────────────── */
-
-static bool py_is_def_line(const char *line, int len, int *out_indent) {
-  int i = 0;
-  while (i < len && line[i] == ' ')
-    i++;
-  if (i + 4 <= len && memcmp(line + i, "def ", 4) == 0) {
-    *out_indent = i;
-    return true;
-  }
-  return false;
-}
-
-static void py_extract_func_name(const char *line, int len, char *out,
-                                 int outsz) {
-  int i = 0;
-  while (i < len && line[i] == ' ')
-    i++;
-  /* skip past "def " which py_is_def_line already verified */
-  if (i + 4 <= len && memcmp(line + i, "def ", 4) == 0)
-    i += 4;
-  else {
-    out[0] = '\0';
-    return;
-  }
-  int s = i;
-  while (i < len && is_word_char(line[i]))
-    i++;
-  int n = i - s;
-  if (n <= 0) {
-    out[0] = '\0';
-    return;
-  }
-  if (n >= outsz)
-    n = outsz - 1;
-  memcpy(out, line + s, (size_t)n);
-  out[n] = '\0';
-}
-
-/* ── Arrow function name extraction (TS/JS) ────────────── */
-
-static void extract_arrow_name(const char *line, int len, char *out,
-                               int outsz) {
-  const char *kws[] = {"const ", "let ", "var ", nullptr};
-  for (int k = 0; kws[k]; k++) {
-    int kwlen = (int)strlen(kws[k]);
-    for (int p = 0; p + kwlen < len; p++) {
-      if (p > 0 && is_word_char(line[p - 1]))
-        continue;
-      if (memcmp(line + p, kws[k], (size_t)kwlen) != 0)
-        continue;
-      int s = p + kwlen;
-      if (s >= len || !isalpha((unsigned char)line[s]))
-        continue;
-      int e = s;
-      while (e < len && is_word_char(line[e]))
-        e++;
-      int n = e - s;
-      if (n > 0 && n < outsz) {
-        memcpy(out, line + s, (size_t)n);
-        out[n] = '\0';
-        return;
-      }
-    }
-  }
-  out[0] = '\0';
-}
-
-/* ── Shell function detection helpers ───────────────────── */
-
-static bool sh_is_func_line(const char *line, int len) {
-  int i = 0;
-  while (i < len && isspace((unsigned char)line[i]))
-    i++;
-  if (i + 9 <= len && memcmp(line + i, "function ", 9) == 0)
-    return true;
-  for (int j = i; j < len - 1; j++) {
-    if (line[j] == '(' && line[j + 1] == ')')
-      return true;
-  }
-  return false;
-}
-
-/* ── Byte-kind map (code/comment/string per byte offset) ── */
-
-static void compute_byte_kind(uint8_t *bk, const char *content, size_t len,
-                              LangFamily lang) {
-  enum { S_CODE, S_LINE_CMT, S_BLOCK_CMT, S_STRING } state = S_CODE;
-  char sq = 0; /* string quote */
-  char bq = 0; /* block-comment quote (Python triple-quote char) */
-
-  for (size_t i = 0; i < len; i++) {
-    char c = content[i];
-
-    switch (state) {
-    case S_CODE:
-      bk[i] = 0;
-      if (lang == LANG_C_LIKE) {
-        if (c == '/' && i + 1 < len && content[i + 1] == '/') {
-          bk[i] = 1;
-          bk[++i] = 1;
-          state = S_LINE_CMT;
-        } else if (c == '/' && i + 1 < len && content[i + 1] == '*') {
-          bk[i] = 3;
-          bk[++i] = 3;
-          state = S_BLOCK_CMT;
-        } else if (c == '"' || c == '\'' || c == '`') {
-          bk[i] = 2;
-          sq = c;
-          state = S_STRING;
-        }
-      } else if (lang == LANG_PYTHON) {
-        if (c == '#') {
-          bk[i] = 1;
-          state = S_LINE_CMT;
-        } else if ((c == '"' || c == '\'') && i + 2 < len &&
-                   content[i + 1] == c && content[i + 2] == c) {
-          bk[i] = 3;
-          bk[++i] = 3;
-          bk[++i] = 3;
-          bq = c;
-          state = S_BLOCK_CMT;
-        } else if (c == '"' || c == '\'') {
-          bk[i] = 2;
-          sq = c;
-          state = S_STRING;
-        }
-      } else if (lang == LANG_SHELL) {
-        if (c == '#') {
-          bk[i] = 1;
-          state = S_LINE_CMT;
-        } else if (c == '"' || c == '\'') {
-          bk[i] = 2;
-          sq = c;
-          state = S_STRING;
-        }
-      }
-      break;
-
-    case S_LINE_CMT:
-      bk[i] = 1;
-      if (c == '\n')
-        state = S_CODE;
-      break;
-
-    case S_BLOCK_CMT:
-      bk[i] = 3;
-      if (lang == LANG_C_LIKE && c == '*' && i + 1 < len &&
-          content[i + 1] == '/') {
-        bk[++i] = 3;
-        state = S_CODE;
-      } else if (lang == LANG_PYTHON && c == bq && i + 2 < len &&
-                 content[i + 1] == bq && content[i + 2] == bq) {
-        bk[++i] = 3;
-        bk[++i] = 3;
-        state = S_CODE;
-      }
-      break;
-
-    case S_STRING:
-      bk[i] = 2;
-      if (c == '\\' && i + 1 < len) {
-        bk[++i] = 2;
-      } else if (c == sq) {
-        state = S_CODE;
-      } else if (c == '\n' && sq != '`') {
-        state = S_CODE;
-      }
-      break;
-    }
-  }
-}
-
-/* ── Post-pass: total lines, comment gradient, defect quartiles ── */
-
-static void scan_finalize(ScanResult *res, const char *content, size_t len,
-                          int max_lines, const uint8_t *line_is_cmnt,
-                          const int *defect_buf, int defect_n) {
-  /* Count real lines (not synthetic) */
-  int real_newlines = 0;
-  for (size_t idx = 0; idx < len; idx++)
-    if (content[idx] == '\n')
-      real_newlines++;
-  if (real_newlines > 0 && content[len - 1] == '\n')
-    res->total_lines = real_newlines;
-  else
-    res->total_lines = real_newlines + 1;
-
-  if (res->line_length_count > res->total_lines)
-    res->line_length_count = res->total_lines;
-
-  /* Comment gradient within code body */
-  const int body_lines = res->total_lines - res->code_body_start + 1;
-  if (body_lines >= MIN_LINES_GRADIENT) {
-    const int half = body_lines / 2;
-    const int mid = res->code_body_start + half;
-    for (int l = res->code_body_start; l <= res->total_lines && l <= max_lines;
-         l++) {
-      if (l < mid) {
-        res->body_lines_top++;
-        if (line_is_cmnt[l])
-          res->body_comment_top++;
-      } else {
-        res->body_lines_bottom++;
-        if (line_is_cmnt[l])
-          res->body_comment_bottom++;
-      }
-    }
-  }
-
-  /* Defects per quartile for Spearman rank correlation */
-  res->total_defects = defect_n;
-  if (res->total_lines >= 4 && defect_n > 0) {
-    int q_sz = res->total_lines / 4;
-    if (q_sz < 1)
-      q_sz = 1;
-    for (int d = 0; d < defect_n; d++) {
-      int q = (defect_buf[d] - 1) / q_sz;
-      if (q >= 4)
-        q = 3;
-      res->defects_per_quartile[q]++;
-    }
-  }
-}
-
-/* ── Narration check (called once per comment line) ────── */
-
-static void check_narration_comment(ScanResult *res, const char *cmnt_buf,
-                                    int cmnt_len, int line_num,
-                                    const char *content, size_t line_start,
-                                    int ll) {
-  int ci = 0;
-  while (ci < cmnt_len && isspace((unsigned char)cmnt_buf[ci]))
-    ci++;
-  int tl = cmnt_len - ci;
-  for (int m = 0; narration_markers[m]; m++) {
-    if (starts_with_ci(cmnt_buf + ci, tl, narration_markers[m])) {
-      if (res->narration_count < MAX_NARRATION) {
-        NarrationHit *h = &res->narration[res->narration_count++];
-        h->line = line_num;
-        int cp = ll;
-        if (cp >= (int)sizeof(h->text))
-          cp = (int)sizeof(h->text) - 1;
-        memcpy(h->text, content + line_start, (size_t)cp);
-        h->text[cp] = '\0';
-      }
-      return;
-    }
-  }
-}
-
-static void check_defect_markers(const char *cmnt_buf, int cmnt_len,
-                                 int *defect_buf, int *defect_n, int max_lines,
-                                 int line_num) {
-  for (int j = 0; j < cmnt_len - 3; j++) {
-    if (starts_with_ci(cmnt_buf + j, cmnt_len - j, "todo") ||
-        starts_with_ci(cmnt_buf + j, cmnt_len - j, "fixme")) {
-      if (*defect_n < max_lines)
-        defect_buf[(*defect_n)++] = line_num;
-      return;
-    }
-  }
 }
 
 /* ── Main scanner ──────────────────────────────────────────
@@ -670,7 +176,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
       if (bstack_top > 0 && line_has_code)
         bstack[bstack_top - 1].code_lines++;
 
-      /* Python function boundary by indentation */
       if (lang == LANG_PYTHON && in_func && py_func_indent >= 0 &&
           line_has_nonws) {
         int indent = 0;
@@ -752,7 +257,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
       if (!line_has_nonws) {
         line_has_nonws = true;
 
-        /* C-like: // or block comment */
         if (lang == LANG_C_LIKE) {
           if (c == '/' && i + 1 < len && content[i + 1] == '/') {
             first_nonws_cmnt = true;
@@ -767,7 +271,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
             continue;
           }
         }
-        /* Python: # or triple-quote */
         if (lang == LANG_PYTHON) {
           if (c == '#') {
             first_nonws_cmnt = true;
@@ -783,7 +286,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
             continue;
           }
         }
-        /* Shell: # */
         if (lang == LANG_SHELL) {
           if (c == '#') {
             first_nonws_cmnt = true;
@@ -831,19 +333,13 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         continue;
       }
 
-      /* ── (c.1) C-like brace tracking & function detection */
+      /* ── C-like brace tracking & function detection ── */
       if (lang == LANG_C_LIKE) {
         if (c == '{') {
-          /*
-           * Detect functions at depth 0 (top-level) and depth 1
-           * (class methods) but NOT depth 1 when already inside
-           * a function (those are control blocks / object literals).
-           */
           if (brace_depth == 0 || (brace_depth == 1 && !in_func)) {
             int cl_len = (int)(i - line_start);
             const char *cl = content + line_start;
 
-            /* reject "} else {" / "} catch {" / "} finally {" */
             int fw = 0;
             while (fw < cl_len && isspace((unsigned char)cl[fw]))
               fw++;
@@ -855,6 +351,20 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
             const char *sig_line = line_has_paren(cl, cl_len) ? cl : prev_line;
             int sig_len = line_has_paren(cl, cl_len) ? cl_len : prev_line_len;
 
+            if (!has_sig && !line_starts_close) {
+              const char *back_line;
+              int back_len;
+              if (scan_back_has_paren(content, line_start, 4, &back_line,
+                                      &back_len)) {
+                has_sig = true;
+                sig_line = back_line;
+                sig_len = back_len;
+              }
+            }
+
+            if (line_is_type_body(cl, cl_len))
+              has_sig = false;
+
             if (has_sig && !line_starts_control(sig_line, sig_len)) {
               if (in_func) {
                 FuncCloseCtx fcc = {res,         &in_func,        &func_camel,
@@ -865,8 +375,14 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
 
               if (res->function_count < MAX_FUNCTIONS) {
                 FuncInfo *fi = &res->functions[res->function_count];
-                fi->start_line = line_num;
                 fi->body_offset = i + 1;
+                int sig_back = 0;
+                if (sig_line >= content && sig_line < content + line_start) {
+                  for (const char *q = sig_line; q < content + line_start; q++)
+                    if (*q == '\n')
+                      sig_back++;
+                }
+                fi->start_line = line_num - sig_back;
                 extract_func_name(sig_line, sig_len, fi->name,
                                   sizeof(fi->name));
                 if (fi->name[0] == '\0') {
@@ -875,6 +391,8 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
                     extract_arrow_name(prev_line, prev_line_len, fi->name,
                                        sizeof(fi->name));
                 }
+                if (fi->name[0] == '\0' && brace_depth == 1)
+                  extract_field_name(cl, cl_len, fi->name, sizeof(fi->name));
                 snprintf(cur_func_name, sizeof(cur_func_name), "%s", fi->name);
                 in_func = true;
               } else {
@@ -938,7 +456,7 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         }
       }
 
-      /* ── (c.2) Keyword / identifier extraction ─────── */
+      /* ── Keyword / identifier extraction ──────────── */
       if (isalpha((unsigned char)c) || c == '_') {
         int wlen = extract_word(content + i, content + len, word, sizeof(word));
         if (wlen > 0) {
@@ -950,7 +468,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
             pending_blk = BLK_TRY;
           else if (strcmp(word, "catch") == 0 || strcmp(word, "except") == 0) {
             pending_blk = BLK_CATCH;
-            /* Python bare except: "except:" with no exception type */
             if (lang == LANG_PYTHON && strcmp(word, "except") == 0) {
               size_t e = i + (size_t)wlen;
               while (e < len && (content[e] == ' ' || content[e] == '\t'))

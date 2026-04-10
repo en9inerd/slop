@@ -3,8 +3,12 @@ const std = @import("std");
 const lib_sources = &.{
     "src/api.c",
     "src/lang.c",
+    "src/scan_util.c",
     "src/scan.c",
+    "src/imports.c",
+    "src/smell_general.c",
     "src/smell.c",
+    "src/calibration.c",
     "src/score.c",
     "src/compress.c",
     "src/dupes.c",
@@ -78,7 +82,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCMacro("SLOP_VERSION", b.fmt("\"{s}\"", .{version}));
     exe.root_module.addCSourceFiles(.{
         .root = b.path(""),
-        .files = &.{"src/main.c"},
+        .files = &.{ "src/main.c", "src/output.c", "src/report.c" },
         .flags = c_flags,
     });
 

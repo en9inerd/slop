@@ -50,6 +50,21 @@ bool util_is_minified(const char *content, size_t len) {
   return (total_len / (size_t)lines) > MAX_AVG_LINE_LEN;
 }
 
+bool util_is_generated(const char *content, size_t len) {
+  size_t check = len > 2048 ? 2048 : len;
+  static const char *const markers[] = {"Code generated", "DO NOT EDIT",
+                                       "@generated", nullptr};
+  for (int m = 0; markers[m]; m++) {
+    size_t mlen = strlen(markers[m]);
+    for (size_t i = 0; i + mlen <= check; i++) {
+      if (memcmp(content + i, markers[m], mlen) == 0)
+        return true;
+    }
+  }
+  return false;
+}
+
 bool util_should_skip(const char *content, size_t len) {
-  return util_is_binary(content, len) || util_is_minified(content, len);
+  return util_is_binary(content, len) || util_is_minified(content, len) ||
+         util_is_generated(content, len);
 }

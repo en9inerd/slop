@@ -31,6 +31,21 @@
 #define MIN_GRADIENT_CMTS 6
 #define SPEARMAN_THRESHOLD 0.5
 
+static inline bool has_comment_gradient(int body_lines_top, int body_comment_top,
+                                        int body_lines_bottom,
+                                        int body_comment_bottom) {
+  if (body_lines_top < MIN_BODY_LINES || body_lines_bottom < MIN_BODY_LINES)
+    return false;
+  int total_c = body_comment_top + body_comment_bottom;
+  if (total_c < MIN_GRADIENT_CMTS)
+    return false;
+  double dt = (double)body_comment_top / body_lines_top;
+  double db = (double)body_comment_bottom / body_lines_bottom;
+  if (db < 0.001)
+    db = 0.001;
+  return dt / db > GRADIENT_THRESHOLD;
+}
+
 /* ── Compression / NCD ───────────────────────────────────── */
 
 #define MIN_COMPRESS_BYTES 500
@@ -312,18 +327,6 @@ typedef struct {
   double temperature;
   int signal_count;
   SignalDetail details[MAX_SIGNAL_DETAILS];
-
-  double m_regularity;
-  double m_ccr;
-  int m_narration_count;
-  double m_cond_density;
-  bool m_decay;
-  double m_dup_ratio;
-  double m_git_composite;
-  double m_ident_spec;
-  double m_func_cv;
-  double m_ttr;
-  double m_indent_reg;
 } ScoreResult;
 
 void score_compute(ScoreResult *out, const ScanResult *scan,
@@ -391,6 +394,7 @@ void fl_collect(FileList *fl, const char *dirpath);
 [[nodiscard]] char *util_read_file(const char *path, size_t *out_len);
 bool util_is_binary(const char *content, size_t len);
 bool util_is_minified(const char *content, size_t len);
+bool util_is_generated(const char *content, size_t len);
 bool util_should_skip(const char *content, size_t len);
 
 /* ── High-Level Library API ──────────────────────────────── */
@@ -450,7 +454,7 @@ void slop_options_default(SlopOptions *opts);
 void slop_file_result_free(SlopFileResult *r);
 void slop_project_result_free(SlopProjectResult *r);
 
-/* ── Shared math (inline, used by main.c and api.c) ──────── */
+/* ── Shared math ─────────────────────────────────────────── */
 
 #include <math.h>
 
@@ -462,7 +466,7 @@ static inline double slop_prior_llr(double prior) {
   return 0;
 }
 
-/* ── Duplicate ratio (shared between main.c and api.c) ───── */
+/* ── Duplicate ratio ─────────────────────────────────────── */
 
 typedef struct {
   double ratio;

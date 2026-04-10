@@ -106,7 +106,6 @@ bool lang_is_source_ext(const char *filename) {
   for (const ExtMap *m = ext_table; m->ext; m++)
     if (strcmp(dot, m->ext) == 0)
       return true;
-  /* extra extensions not in ext_table but still source */
   static const char *extra[] = {".rb", ".lua", ".pl", ".pm",
                                 ".r",  ".R",   ".jl", nullptr};
   for (int i = 0; extra[i]; i++)

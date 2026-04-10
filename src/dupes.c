@@ -95,7 +95,6 @@ void dupes_compute(DupeResult *dr, double threshold) {
       if (a->lang != b->lang)
         continue;
 
-      /* pre-filter: skip if size ratio > 2.0 */
       size_t mx = a->body_len > b->body_len ? a->body_len : b->body_len;
       size_t mn = a->body_len < b->body_len ? a->body_len : b->body_len;
       if (mn == 0 || (double)mx / (double)mn > NCD_SIZE_RATIO_MAX)
