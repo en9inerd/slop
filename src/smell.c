@@ -107,6 +107,78 @@ typedef struct {
 
 static const char *null_kws[] = {"null", "undefined", "nil", "None", nullptr};
 
+static int find_null_keyword(const ScanResult *s, const char *ln, int ll,
+                             size_t line_start, int search_from, int *out_nkl) {
+  for (int nk = 0; null_kws[nk]; nk++) {
+    int nkl = (int)strlen(null_kws[nk]);
+    for (int pos = search_from; pos + nkl <= ll; pos++) {
+      if (s->byte_kind[line_start + (size_t)pos] != 0)
+        continue;
+      if (memcmp(ln + pos, null_kws[nk], (size_t)nkl) != 0)
+        continue;
+      bool wb = (pos == 0 ||
+                 (!isalnum((unsigned char)ln[pos - 1]) && ln[pos - 1] != '_'));
+      bool wa = (pos + nkl >= ll || (!isalnum((unsigned char)ln[pos + nkl]) &&
+                                     ln[pos + nkl] != '_'));
+      if (wb && wa) {
+        *out_nkl = nkl;
+        return pos;
+      }
+    }
+  }
+  return -1;
+}
+
+static bool extract_checked_var(const char *ln, int if_start, int null_pos,
+                                char *var, int varsz) {
+  int op = null_pos - 1;
+  while (op > if_start &&
+         (ln[op] == ' ' || ln[op] == '=' || ln[op] == '!'))
+    op--;
+  for (;;) {
+    if (op >= if_start + 2 && ln[op] == 't' && ln[op - 1] == 'o' &&
+        ln[op - 2] == 'n' && (op - 3 < if_start || ln[op - 3] == ' ')) {
+      op -= 3;
+      while (op > if_start && ln[op] == ' ')
+        op--;
+    } else if (op >= if_start + 1 && ln[op] == 's' && ln[op - 1] == 'i' &&
+               (op - 2 < if_start || ln[op - 2] == ' ')) {
+      op -= 2;
+      while (op > if_start && ln[op] == ' ')
+        op--;
+    } else
+      break;
+  }
+  if (op <= if_start)
+    return false;
+  int ve = op + 1;
+  int vs = ve;
+  while (vs > if_start && (isalnum((unsigned char)ln[vs - 1]) ||
+                           ln[vs - 1] == '_' || ln[vs - 1] == '.'))
+    vs--;
+  int vlen = ve - vs;
+  if (vlen < 1 || vlen >= varsz)
+    return false;
+  memcpy(var, ln + vs, (size_t)vlen);
+  var[vlen] = '\0';
+  return true;
+}
+
+static void record_null_check(NullCheck *recent, int *rc, const char *var,
+                              int line) {
+  if (*rc < NULL_CHECK_RING_CAP) {
+    snprintf(recent[*rc].var, sizeof(recent[*rc].var), "%s", var);
+    recent[*rc].line = line;
+    (*rc)++;
+  } else {
+    memmove(recent, recent + 1,
+            (NULL_CHECK_RING_CAP - 1) * sizeof(NullCheck));
+    snprintf(recent[NULL_CHECK_RING_CAP - 1].var, sizeof(recent[0].var), "%s",
+             var);
+    recent[NULL_CHECK_RING_CAP - 1].line = line;
+  }
+}
+
 static void check_null_line(SmellReport *r, const ScanResult *s, const char *ln,
                             int ll, int line, size_t line_start,
                             NullCheck *recent, int *rc) {
@@ -118,77 +190,26 @@ static void check_null_line(SmellReport *r, const ScanResult *s, const char *ln,
   if (ln[j + 2] != ' ' && ln[j + 2] != '(')
     return;
 
-  for (int nk = 0; null_kws[nk]; nk++) {
-    int nkl = (int)strlen(null_kws[nk]);
-    for (int pos = j + 2; pos + nkl <= ll; pos++) {
-      if (s->byte_kind[line_start + (size_t)pos] != 0)
-        continue;
-      if (memcmp(ln + pos, null_kws[nk], (size_t)nkl) != 0)
-        continue;
-      bool wb = (pos == 0 ||
-                 (!isalnum((unsigned char)ln[pos - 1]) && ln[pos - 1] != '_'));
-      bool wa = (pos + nkl >= ll || (!isalnum((unsigned char)ln[pos + nkl]) &&
-                                     ln[pos + nkl] != '_'));
-      if (!wb || !wa)
-        continue;
+  int nkl = 0;
+  int pos = find_null_keyword(s, ln, ll, line_start, j + 2, &nkl);
+  if (pos < 0)
+    return;
 
-      int op = pos - 1;
-      while (op > j && (ln[op] == ' ' || ln[op] == '=' || ln[op] == '!'))
-        op--;
-      for (;;) {
-        if (op >= j + 2 && ln[op] == 't' && ln[op - 1] == 'o' &&
-            ln[op - 2] == 'n' && (op - 3 < j || ln[op - 3] == ' ')) {
-          op -= 3;
-          while (op > j && ln[op] == ' ')
-            op--;
-        } else if (op >= j + 1 && ln[op] == 's' && ln[op - 1] == 'i' &&
-                   (op - 2 < j || ln[op - 2] == ' ')) {
-          op -= 2;
-          while (op > j && ln[op] == ' ')
-            op--;
-        } else
-          break;
-      }
-      if (op <= j)
-        return;
-      int ve = op + 1;
-      int vs = ve;
-      while (vs > j && (isalnum((unsigned char)ln[vs - 1]) ||
-                        ln[vs - 1] == '_' || ln[vs - 1] == '.'))
-        vs--;
-      int vlen = ve - vs;
-      if (vlen < 1 || vlen > 63)
-        return;
+  char var[64];
+  if (!extract_checked_var(ln, j, pos, var, sizeof(var)))
+    return;
 
-      char var[64];
-      memcpy(var, ln + vs, (size_t)vlen);
-      var[vlen] = '\0';
-
-      for (int k = 0; k < *rc; k++) {
-        if (strcmp(recent[k].var, var) == 0 &&
-            line - recent[k].line <= NULL_CHECK_WINDOW &&
-            line != recent[k].line) {
-          add_finding(
-              r, SMELL_OVERWRAP, SEV_CORRELATED, line,
-              "redundant null check on '%s' (already checked at line %d)", var,
-              recent[k].line);
-          return;
-        }
-      }
-      if (*rc < NULL_CHECK_RING_CAP) {
-        snprintf(recent[*rc].var, sizeof(recent[*rc].var), "%s", var);
-        recent[*rc].line = line;
-        (*rc)++;
-      } else {
-        memmove(recent, recent + 1,
-                (NULL_CHECK_RING_CAP - 1) * sizeof(NullCheck));
-        snprintf(recent[NULL_CHECK_RING_CAP - 1].var, sizeof(recent[0].var),
-                 "%s", var);
-        recent[NULL_CHECK_RING_CAP - 1].line = line;
-      }
+  for (int k = 0; k < *rc; k++) {
+    if (strcmp(recent[k].var, var) == 0 &&
+        line - recent[k].line <= NULL_CHECK_WINDOW &&
+        line != recent[k].line) {
+      add_finding(r, SMELL_OVERWRAP, SEV_CORRELATED, line,
+                  "redundant null check on '%s' (already checked at line %d)",
+                  var, recent[k].line);
       return;
     }
   }
+  record_null_check(recent, rc, var, line);
 }
 
 static void detect_overwrap(SmellReport *r, const ScanResult *s) {

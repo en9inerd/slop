@@ -22,8 +22,8 @@ int main(int argc, char **argv) {
     printf("=== Analyzing directory: %s ===\n\n", argv[1]);
     SlopProjectResult pr = slop_analyze_dir(argv[1], &opts);
 
-    printf("Files: %d  (flagged=%d, suspicious=%d, human=%d, skipped=%d)\n",
-           pr.file_count, pr.flagged, pr.suspicious, pr.human, pr.skipped);
+    printf("Files: %d  (sloppy=%d, moderate=%d, clean=%d, skipped=%d)\n",
+           pr.file_count, pr.sloppy, pr.moderate, pr.clean, pr.skipped);
     printf("Dup ratio: %.2f (%d/%d funcs)\n\n", pr.dup_ratio, pr.funcs_in_dup,
            pr.total_funcs);
 
@@ -31,8 +31,8 @@ int main(int argc, char **argv) {
       SlopFileResult *f = &pr.files[i];
       if (f->skipped)
         continue;
-      printf("  %-50s P(AI)=%.3f  smells=%d  dead=%d\n", f->filepath,
-             f->probability, f->smells.count, f->dead_lines);
+      printf("  %-50s slop=%.1f  findings=%d  dead=%d\n", f->filepath,
+             f->probability * 10.0, f->smells.count, f->dead_lines);
     }
 
     slop_project_result_free(&pr);
@@ -43,13 +43,13 @@ int main(int argc, char **argv) {
     if (fr.skipped) {
       printf("  skipped (binary/minified/generated)\n");
     } else {
-      printf("  P(AI) = %.3f  (raw score = %+.2f)\n", fr.probability,
+      printf("  slop = %.1f / 10  (raw = %+.2f)\n", fr.probability * 10.0,
              fr.raw_score);
       printf("  lines: %d total, %d code, %d comment, %d blank\n",
              fr.total_lines, fr.code_lines, fr.comment_lines, fr.blank_lines);
       printf("  functions: %d  dead lines: %d\n", fr.function_count,
              fr.dead_lines);
-      printf("  smells: %d findings\n", fr.smells.count);
+      printf("  findings: %d\n", fr.smells.count);
 
       for (int i = 0; i < fr.smells.count; i++)
         printf("    line %-5d %s\n", fr.smells.items[i].line,

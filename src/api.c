@@ -135,11 +135,11 @@ SlopProjectResult slop_analyze_dir(const char *dirpath,
     if (r->skipped)
       pr.skipped++;
     else if (r->probability >= PROB_FLAGGED)
-      pr.flagged++;
+      pr.sloppy++;
     else if (r->probability >= PROB_SUSPICIOUS)
-      pr.suspicious++;
+      pr.moderate++;
     else
-      pr.human++;
+      pr.clean++;
 
     pr.file_count++;
     free(content);

@@ -4,11 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ── Probability thresholds ──────────────────────────────── */
+/* ── Score thresholds (mapped to slop 0-10 via *10) ──────── */
 
-#define PROB_FLAGGED 0.85
-#define PROB_SUSPICIOUS 0.60
-#define PROB_INCONCLUSIVE 0.40
+#define PROB_FLAGGED 0.85     /* >= 8.5/10: sloppy */
+#define PROB_SUSPICIOUS 0.60  /* >= 6.0/10: moderate */
+#define PROB_INCONCLUSIVE 0.40 /* >= 4.0/10: mild */
 
 /* ── LLR clamping ────────────────────────────────────────── */
 
@@ -101,11 +101,6 @@
 #define MIN_TEMPERATURE 0.1
 #define MIN_GAUSS_SIGMA 0.01
 #define MIN_BINARY_PROB 0.01
-#define ECE_BIN_COUNT 10
-#define TEMP_GRID_MIN 0.5
-#define TEMP_GRID_MAX 5.0
-#define TEMP_GRID_STEP 0.1
-#define MIN_CAL_FILES 10
 
 /* ── Language ────────────────────────────────────────────── */
 
@@ -299,7 +294,6 @@ typedef struct {
 
 void calibration_default(Calibration *cal);
 [[nodiscard]] bool calibration_load(Calibration *cal, const char *dir);
-[[nodiscard]] bool calibration_save(const Calibration *cal, const char *dir);
 
 /* ── Score ───────────────────────────────────────────────── */
 
@@ -405,7 +399,7 @@ typedef struct {
   bool include_general_smells; /* include GENERAL-severity smells (default:
                                   false) */
   bool use_git; /* include git commit pattern signal (default: false) */
-  double prior; /* P(AI) prior, 0.5 = uninformative (default: 0.5) */
+  double prior; /* prior probability, 0.5 = uninformative (default: 0.5) */
   const char *calibration_dir; /* directory containing .slop-calibration.json,
                                   or nullptr */
 } SlopOptions;
@@ -440,9 +434,9 @@ typedef struct {
 
   Calibration calibration;
 
-  int flagged;
-  int suspicious;
-  int human;
+  int sloppy;
+  int moderate;
+  int clean;
   int skipped;
 } SlopProjectResult;
 

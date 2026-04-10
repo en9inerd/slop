@@ -64,11 +64,11 @@ static const char *smell_kind_str(SmellKind k) {
 static const char *severity_str(SmellSeverity s) {
   switch (s) {
   case SEV_DIAGNOSTIC:
-    return "DIAGNOSTIC";
+    return "strong tell";
   case SEV_CORRELATED:
-    return "CORRELATED";
+    return "score-related";
   case SEV_GENERAL:
-    return "GENERAL";
+    return "general";
   }
   return "?";
 }
@@ -94,25 +94,80 @@ static void print_findings(const char *filename, const SmellReport *r) {
 
 static const char *score_label(double p) {
   if (p >= PROB_FLAGGED)
-    return "likely AI";
+    return "sloppy";
   if (p >= PROB_SUSPICIOUS)
-    return "suspicious";
+    return "moderate";
   if (p >= PROB_INCONCLUSIVE)
-    return "inconclusive";
-  return "likely human";
+    return "mild";
+  return "clean";
+}
+
+static double slop_score_10(double prob) { return prob * 10.0; }
+
+static const char *signal_why(const char *group, const char *signal) {
+  static const struct {
+    const char *group;
+    const char *signal;
+    const char *why;
+  } table[] = {
+      {"score", "insufficient code",
+       "No executable lines; score stays at the neutral prior."},
+      {"regularity", "composite",
+       "How uniform line lengths look (entropy, spread, zlib ratio when known)."},
+      {"regularity", "composite*",
+       "How uniform line lengths look (entropy, spread, zlib ratio when known)."},
+      {"comments", "comment-to-code",
+       "Share of lines that are comments vs code."},
+      {"comments", "narration",
+       "Whether comments narrate the obvious ('First, we validate input')."},
+      {"structure", "conditional dens.",
+       "Density of if/while/for-style keywords per line of code."},
+      {"position", "quality decay",
+       "Whether comments or defects pile up unevenly across the file."},
+      {"patterns", "over-wrapping",
+       "Extra defensive checks (null, length) beyond what callers need."},
+      {"patterns", "naming breaks",
+       "Mixed camelCase vs snake_case inside one function."},
+      {"naming", "ident. specificity",
+       "Fraction of identifiers that are generic (data, result, handler, ...)."},
+      {"structure", "func length CV",
+       "How similar function body sizes are (variance of line counts)."},
+      {"naming", "token diversity",
+       "Unique vs repeated identifiers (reuse of the same names)."},
+      {"whitespace", "indent regularity",
+       "How regular indentation depth is across lines."},
+      {"dupes", "duplicate ratio",
+       "Project-wide share of functions that sit in duplicate clusters."},
+      {"git", "commit style",
+       "Recent git messages vs typical human commit patterns."},
+  };
+  for (int i = 0; i < (int)(sizeof(table) / sizeof(table[0])); i++) {
+    if (strcmp(group, table[i].group) == 0 &&
+        strcmp(signal, table[i].signal) == 0)
+      return table[i].why;
+  }
+  return "Positive weight = more concern; negative = cleaner (see METHODOLOGY).";
+}
+
+static void print_signal_table(const ScoreResult *sc, bool with_why) {
+  printf("\n  %-40s %-16s %8s\n", "Check (category / name)", "Value", "weight");
+  print_rule(RULE_W_WIDE);
+  for (int i = 0; i < sc->signal_count; i++) {
+    const SignalDetail *d = &sc->details[i];
+    char label[72];
+    snprintf(label, sizeof(label), "%s / %s", d->group, d->signal);
+    printf("  %-40s %-16s %+7.2f\n", label, d->measured, d->llr);
+    if (with_why)
+      printf("    %s\n", signal_why(d->group, d->signal));
+  }
+  print_rule(RULE_W_WIDE);
 }
 
 static void print_score(const char *filename, const ScoreResult *sc) {
-  printf("\n  %s \xe2\x80\x94 score %+.2f  P(AI) = %.3f  [%s]\n", filename,
-         sc->raw_score, sc->probability, score_label(sc->probability));
-  printf("\n  %-14s %-20s %-14s %s\n", "group", "signal", "measured", "LLR");
-  print_rule(RULE_W);
-  for (int i = 0; i < sc->signal_count; i++) {
-    const SignalDetail *d = &sc->details[i];
-    printf("  %-14s %-20s %-14s %+.2f\n", d->group, d->signal, d->measured,
-           d->llr);
-  }
-  print_rule(RULE_W);
+  printf("\n  %s \xe2\x80\x94 slop %.1f/10  [%s]\n", filename,
+         slop_score_10(sc->probability), score_label(sc->probability));
+  printf("\n  \"weight\" is log-odds evidence per check; they sum to the raw score.\n");
+  print_signal_table(sc, true);
   printf("  %36s %+.2f\n", "raw total", sc->raw_score);
   printf("  %36s %+.2f\n", "scaled (/T)", sc->raw_score / sc->temperature);
 }
@@ -148,9 +203,9 @@ static void print_score_json(const char *filename, const ScoreResult *sc,
                              int dead_lines) {
   char esc[4096];
   json_escape(filename, esc, sizeof(esc));
-  printf("    {\"file\": \"%s\", \"score\": %.4f, \"probability\": %.4f, "
+  printf("    {\"file\": \"%s\", \"raw_score\": %.4f, \"slop_score\": %.1f, "
          "\"dead_lines\": %d, \"label\": \"%s\", \"signals\": [",
-         esc, sc->raw_score, sc->probability, dead_lines,
+         esc, sc->raw_score, slop_score_10(sc->probability), dead_lines,
          score_label(sc->probability));
   for (int i = 0; i < sc->signal_count; i++) {
     const SignalDetail *d = &sc->details[i];
@@ -213,7 +268,7 @@ static bool scan_one_file(FileScanCtx *ctx, const char *path,
 
 static void scan_one_free(FileScanCtx *ctx) { scan_free(&ctx->scan); }
 
-/* ── Smell command ──────────────────────────────────────── */
+/* ── Check command (alias: smell) ─────────────────────────── */
 
 typedef struct {
   int files_scanned;
@@ -260,7 +315,7 @@ static void process_smell(const char *path, bool include_all,
   free(content);
 }
 
-static int cmd_smell(int argc, char **argv) {
+static int cmd_check(int argc, char **argv) {
   bool include_all = false;
   const char *target = nullptr;
 
@@ -304,7 +359,7 @@ static int cmd_smell(int argc, char **argv) {
            stats.files_scanned, stats.files_scanned == 1 ? "" : "s",
            stats.files_with_findings, stats.total_findings);
   if (stats.total_findings == 0 && stats.files_scanned > 0)
-    printf("\n  no smells found\n");
+    printf("\n  no issues found\n");
   printf("\n");
 
   if (stats.has_diagnostic)
@@ -314,42 +369,66 @@ static int cmd_smell(int argc, char **argv) {
   return 0;
 }
 
-/* ── Scan command ───────────────────────────────────────── */
+/* ── Shared helpers for scan / report commands ─────────── */
+
+static void scoring_init(Calibration *cal, double prior,
+                         double *out_prior_llr) {
+  calibration_default(cal);
+  (void)calibration_load(cal, ".");
+  *out_prior_llr = slop_prior_llr(prior);
+}
 
 typedef struct {
   char path[4096];
-  double score;
   double prob;
+  double raw_score;
   int dead_lines;
   ScoreResult sc;
-} ScanEntry;
+} FileEntry;
 
 typedef struct {
   int files_scanned;
   int files_skipped;
-  int flagged;
-  int suspicious;
-  int human;
+  int sloppy;
+  int moderate;
+  int clean;
 } ScanStats;
 
 #define MAX_SCAN_ENTRIES 8192
 static const char OPT_PRIOR[] = "--prior=";
 
 static int entry_cmp(const void *a, const void *b) {
-  const double pa = ((const typeof(ScanEntry) *)a)->prob;
-  const double pb = ((const typeof(ScanEntry) *)b)->prob;
+  const double pa = ((const FileEntry *)a)->prob;
+  const double pb = ((const FileEntry *)b)->prob;
   return (pa < pb) ? 1 : (pa > pb) ? -1 : 0;
 }
 
 static void classify(ScanStats *ss, double prob) {
   ss->files_scanned++;
   if (prob >= PROB_FLAGGED)
-    ss->flagged++;
+    ss->sloppy++;
   else if (prob >= PROB_SUSPICIOUS)
-    ss->suspicious++;
+    ss->moderate++;
   else
-    ss->human++;
+    ss->clean++;
 }
+
+static void print_file_table(const FileEntry *entries, int count) {
+  printf("\n  %-7s %-7s %-5s %s\n", "slop", "raw", "dead", "file");
+  print_rule(RULE_W);
+  for (int i = 0; i < count; i++) {
+    const FileEntry *e = &entries[i];
+    if (e->dead_lines > 0)
+      printf("  %-7.1f %+6.2f  %-5d %s\n", slop_score_10(e->prob),
+             e->raw_score, e->dead_lines, e->path);
+    else
+      printf("  %-7.1f %+6.2f  %-5s %s\n", slop_score_10(e->prob),
+             e->raw_score, "-", e->path);
+  }
+  print_rule(RULE_W);
+}
+
+/* ── Scan command ───────────────────────────────────────── */
 
 static int cmd_scan(int argc, char **argv) {
   const char *target = nullptr;
@@ -380,21 +459,14 @@ static int cmd_scan(int argc, char **argv) {
   }
 
   Calibration cal;
-  calibration_default(&cal);
-  (void)calibration_load(&cal, ".");
-
-  const double prior_llr = slop_prior_llr(prior);
+  double prior_llr;
+  scoring_init(&cal, prior, &prior_llr);
 
   struct stat st;
   if (stat(target, &st) != 0) {
     err_cannot_stat(target);
     return 1;
   }
-
-  if (!json_out && !cal.loaded)
-    printf("\n  \xe2\x9a\xa0 UNCALIBRATED (T=%.1f)"
-           " \xe2\x80\x94 run 'slop calibrate' for precision\n",
-           cal.temperature);
 
   ScanStats ss = {};
 
@@ -403,22 +475,15 @@ static int cmd_scan(int argc, char **argv) {
     fl_init(&fl);
     fl_collect(&fl, target);
 
-    /*
-     * Two-pass scan:
-     *   Pass 1 — collect functions from every file for cross-file
-     *            duplicate detection (Group E).
-     *   Pass 2 — score every file with the real project-wide dup_ratio.
-     */
-
-    /* ── Pass 1: collect dupes ────────────────────────── */
+    /* Pass 1: cross-file duplicate detection (Group E) */
     DupeResult dr;
     dupes_init(&dr);
     collect_dupes(&dr, &fl);
     const DupRatioResult drr = dupes_compute_ratio(&dr);
     double dup_ratio = drr.ratio;
 
-    /* ── Pass 2: score each file with real dup_ratio ── */
-    ScanEntry *entries = malloc(MAX_SCAN_ENTRIES * sizeof(ScanEntry));
+    /* Pass 2: score each file with real dup_ratio */
+    FileEntry *entries = malloc(MAX_SCAN_ENTRIES * sizeof(FileEntry));
     int entry_count = 0;
 
     for (int i = 0; i < fl.count; i++) {
@@ -442,10 +507,10 @@ static int cmd_scan(int argc, char **argv) {
         if (ctx.dead_lines > 0)
           printf("  dead_lines        = %d\n", ctx.dead_lines);
       } else if (entry_count < MAX_SCAN_ENTRIES) {
-        ScanEntry *e = &entries[entry_count++];
+        FileEntry *e = &entries[entry_count++];
         snprintf(e->path, sizeof(e->path), "%s", fl.paths[i]);
-        e->score = ctx.sc.raw_score;
         e->prob = ctx.sc.probability;
+        e->raw_score = ctx.sc.raw_score;
         e->dead_lines = ctx.dead_lines;
         e->sc = ctx.sc;
       }
@@ -456,7 +521,7 @@ static int cmd_scan(int argc, char **argv) {
 
     /* ── Output ───────────────────────────────────────── */
     if (!verbose && !json_out && entry_count > 0) {
-      qsort(entries, (size_t)entry_count, sizeof(ScanEntry), entry_cmp);
+      qsort(entries, (size_t)entry_count, sizeof(FileEntry), entry_cmp);
       printf("\n  scanned %d file%s", ss.files_scanned,
              ss.files_scanned == 1 ? "" : "s");
       if (ss.files_skipped > 0)
@@ -468,21 +533,9 @@ static int cmd_scan(int argc, char **argv) {
       for (int i = 0; i < entry_count; i++)
         total_dead += entries[i].dead_lines;
 
-      printf("\n\n  %-7s %-7s %-5s %s\n", "P(AI)", "score", "dead", "file");
-      print_rule(RULE_W);
-      for (int i = 0; i < entry_count; i++) {
-        const ScanEntry *e = &entries[i];
-        if (e->dead_lines > 0)
-          printf("  %-7.3f %+6.2f  %-5d %s\n", e->prob, e->score, e->dead_lines,
-                 e->path);
-        else
-          printf("  %-7.3f %+6.2f  %-5s %s\n", e->prob, e->score, "-", e->path);
-      }
-      print_rule(RULE_W);
-      printf("\n  %d flagged (P > %.2f) / %d suspicious (%.2f-%.2f)"
-             " / %d likely human\n",
-             ss.flagged, PROB_FLAGGED, ss.suspicious, PROB_SUSPICIOUS,
-             PROB_FLAGGED, ss.human);
+      print_file_table(entries, entry_count);
+      printf("\n  %d sloppy / %d moderate / %d clean\n", ss.sloppy, ss.moderate,
+             ss.clean);
       if (total_dead > 0)
         printf("  %d dead lines detected across project\n", total_dead);
     }
@@ -534,9 +587,9 @@ static int cmd_scan(int argc, char **argv) {
   }
 
   printf("\n");
-  if (ss.flagged > 0)
+  if (ss.sloppy > 0)
     return 2;
-  if (ss.suspicious > 0)
+  if (ss.moderate > 0)
     return 1;
   return 0;
 }
@@ -577,51 +630,41 @@ static int cmd_scan_stdin(int argc, char **argv) {
   buf[len] = '\0';
 
   char fake_name[64] = "<stdin>";
-  LangFamily lang = LANG_C_LIKE;
-  if (lang_name) {
-    if (strcmp(lang_name, "python") == 0 || strcmp(lang_name, "py") == 0)
-      lang = LANG_PYTHON;
-    else if (strcmp(lang_name, "shell") == 0 || strcmp(lang_name, "sh") == 0 ||
-             strcmp(lang_name, "bash") == 0)
-      lang = LANG_SHELL;
+  if (lang_name)
     snprintf(fake_name, sizeof(fake_name), "<stdin>.%s", lang_name);
-  }
 
   Calibration cal;
-  calibration_default(&cal);
-  (void)calibration_load(&cal, ".");
+  double prior_llr;
+  scoring_init(&cal, prior, &prior_llr);
 
-  const double prior_llr = slop_prior_llr(prior);
-
-  ScanResult scan;
-  scan_file(&scan, fake_name, buf, len, lang);
-  double cr = compress_ratio(buf, len);
-
-  GitFeatures gf = {};
-  ScoreResult sc;
-  score_compute(&sc, &scan, &cal, cr, -1, &gf);
-  sc.raw_score += prior_llr;
-  sc.probability = slop_sigmoid(sc.raw_score / cal.temperature);
+  FileScanCtx ctx;
+  scan_one_file(&ctx, fake_name, buf, len, &cal, -1, false, prior_llr);
 
   if (json_out) {
     printf("[\n");
-    print_score_json(fake_name, &sc, 0);
+    print_score_json(fake_name, &ctx.sc, 0);
     printf("\n]\n");
   } else {
-    if (!cal.loaded)
-      printf("\n  \xe2\x9a\xa0 UNCALIBRATED (T=%.1f)\n", cal.temperature);
-    print_score(fake_name, &sc);
+    print_score(fake_name, &ctx.sc);
   }
   printf("\n");
 
-  scan_free(&scan);
+  double prob = ctx.sc.probability;
+  scan_one_free(&ctx);
   free(buf);
-  return sc.probability >= PROB_FLAGGED      ? 2
-         : sc.probability >= PROB_SUSPICIOUS ? 1
-                                             : 0;
+  return prob >= PROB_FLAGGED ? 2 : prob >= PROB_SUSPICIOUS ? 1 : 0;
 }
 
 /* ── Dupes command ──────────────────────────────────────── */
+
+typedef struct {
+  int cluster;
+  int size;
+} ClusterOrder;
+
+static int cluster_order_cmp(const void *a, const void *b) {
+  return ((const ClusterOrder *)b)->size - ((const ClusterOrder *)a)->size;
+}
 
 static void print_dupes(const DupeResult *dr, double threshold) {
   if (dr->cluster_count == 0) {
@@ -652,22 +695,19 @@ static void print_dupes(const DupeResult *dr, double threshold) {
       min_ncd[cl] = dr->pairs[p].ncd;
   }
 
-  int *order = malloc(((size_t)max_cluster + 2) * sizeof(int));
+  ClusterOrder *order = malloc(((size_t)max_cluster + 2) * sizeof(ClusterOrder));
   int nclusters = 0;
   for (int c = 0; c <= max_cluster; c++)
-    if (sizes[c] >= 2)
-      order[nclusters++] = c;
-  for (int i = 0; i < nclusters - 1; i++)
-    for (int j = i + 1; j < nclusters; j++)
-      if (sizes[order[i]] < sizes[order[j]]) {
-        int t = order[i];
-        order[i] = order[j];
-        order[j] = t;
-      }
+    if (sizes[c] >= 2) {
+      order[nclusters].cluster = c;
+      order[nclusters].size = sizes[c];
+      nclusters++;
+    }
+  qsort(order, (size_t)nclusters, sizeof(ClusterOrder), cluster_order_cmp);
 
   int printed = 0;
   for (int ci = 0; ci < nclusters && printed < MAX_DUP_CLUSTERS; ci++) {
-    int c = order[ci];
+    int c = order[ci].cluster;
     printed++;
     printf("\n  cluster %d \xe2\x80\x94 NCD %.2f (%s)\n", printed, min_ncd[c],
            min_ncd[c] < 0.10   ? "nearly identical"
@@ -751,406 +791,6 @@ static int cmd_dupes(int argc, char **argv) {
   return found > 0 ? 2 : 0;
 }
 
-/* ── Calibrate command ──────────────────────────────────── */
-
-typedef struct {
-  double *vals;
-  int count;
-  int cap;
-} DVec;
-
-static void dv_init(DVec *v) {
-  v->count = 0;
-  v->cap = 256;
-  v->vals = malloc(256 * sizeof(double));
-}
-
-static void dv_push(DVec *v, double x) {
-  if (v->count >= v->cap) {
-    v->cap *= 2;
-    v->vals = realloc(v->vals, (size_t)v->cap * sizeof(double));
-  }
-  v->vals[v->count++] = x;
-}
-
-static void dv_free(DVec *v) {
-  free(v->vals);
-  v->count = 0;
-}
-
-static double dv_mean(const DVec *v) {
-  if (v->count == 0)
-    return 0;
-  double s = 0;
-  for (int i = 0; i < v->count; i++)
-    s += v->vals[i];
-  return s / v->count;
-}
-
-static double dv_stdev(const DVec *v) {
-  if (v->count < 2)
-    return MIN_GAUSS_SIGMA;
-  double m = dv_mean(v);
-  double s = 0;
-  for (int i = 0; i < v->count; i++) {
-    double d = v->vals[i] - m;
-    s += d * d;
-  }
-  double sd = sqrt(s / v->count);
-  return sd < MIN_GAUSS_SIGMA ? MIN_GAUSS_SIGMA : sd;
-}
-
-typedef struct {
-  DVec reg, ccr, narr, cond, decay, overwrap, namebrk, ident, func_cv, ttr,
-      indent;
-} MeasurementVecs;
-
-static void mv_init(MeasurementVecs *mv) {
-  dv_init(&mv->reg);
-  dv_init(&mv->ccr);
-  dv_init(&mv->narr);
-  dv_init(&mv->cond);
-  dv_init(&mv->decay);
-  dv_init(&mv->overwrap);
-  dv_init(&mv->namebrk);
-  dv_init(&mv->ident);
-  dv_init(&mv->func_cv);
-  dv_init(&mv->ttr);
-  dv_init(&mv->indent);
-}
-
-static void mv_free(MeasurementVecs *mv) {
-  dv_free(&mv->reg);
-  dv_free(&mv->ccr);
-  dv_free(&mv->narr);
-  dv_free(&mv->cond);
-  dv_free(&mv->decay);
-  dv_free(&mv->overwrap);
-  dv_free(&mv->namebrk);
-  dv_free(&mv->ident);
-  dv_free(&mv->func_cv);
-  dv_free(&mv->ttr);
-  dv_free(&mv->indent);
-}
-
-static void collect_measurements(const char *dirpath, MeasurementVecs *mv) {
-  FileList fl;
-  fl_init(&fl);
-
-  struct stat st;
-  if (stat(dirpath, &st) != 0)
-    return;
-  if (S_ISDIR(st.st_mode))
-    fl_collect(&fl, dirpath);
-  else
-    fl_add(&fl, dirpath);
-
-  Calibration cal;
-  calibration_default(&cal);
-
-  for (int i = 0; i < fl.count; i++) {
-    size_t len = 0;
-    char *content = util_read_file(fl.paths[i], &len);
-    if (!content)
-      continue;
-    if (util_should_skip(content, len)) {
-      free(content);
-      continue;
-    }
-
-    FileScanCtx ctx;
-    scan_one_file(&ctx, fl.paths[i], content, len, &cal, -1, false, 0);
-
-    dv_push(&mv->reg, ctx.sc.m_regularity);
-    dv_push(&mv->ccr, ctx.sc.m_ccr);
-    dv_push(&mv->narr, ctx.sc.m_narration_count >= NARRATION_TIER1 ? 1.0 : 0.0);
-    dv_push(&mv->cond, ctx.sc.m_cond_density);
-    dv_push(&mv->decay, ctx.sc.m_decay ? 1.0 : 0.0);
-    dv_push(&mv->overwrap, ctx.scan.overwrap_count > 0 ? 1.0 : 0.0);
-    dv_push(&mv->namebrk, ctx.scan.name_break_count > 0 ? 1.0 : 0.0);
-    if (ctx.sc.m_ident_spec >= 0)
-      dv_push(&mv->ident, ctx.sc.m_ident_spec);
-    if (ctx.sc.m_func_cv >= 0)
-      dv_push(&mv->func_cv, ctx.sc.m_func_cv);
-    if (ctx.sc.m_ttr >= 0)
-      dv_push(&mv->ttr, ctx.sc.m_ttr);
-    if (ctx.sc.m_indent_reg >= 0)
-      dv_push(&mv->indent, ctx.sc.m_indent_reg);
-
-    scan_one_free(&ctx);
-    free(content);
-  }
-  fl_free(&fl);
-}
-
-static double compute_ece(const double *probs, const int *labels, int n,
-                          int bins) {
-  if (n == 0)
-    return 1.0;
-  double ece = 0;
-  for (int b = 0; b < bins; b++) {
-    double lo = (double)b / bins, hi = (double)(b + 1) / bins;
-    int cnt = 0;
-    double acc_sum = 0, conf_sum = 0;
-    for (int i = 0; i < n; i++) {
-      if (probs[i] >= lo && probs[i] < hi) {
-        cnt++;
-        acc_sum += labels[i];
-        conf_sum += probs[i];
-      }
-    }
-    if (cnt > 0) {
-      double acc = acc_sum / cnt;
-      double conf = conf_sum / cnt;
-      ece += ((double)cnt / n) * fabs(acc - conf);
-    }
-  }
-  return ece;
-}
-
-static double clampd_cal(double x, double lo, double hi) {
-  return x < lo ? lo : x > hi ? hi : x;
-}
-
-static double gauss_llr_cal(double x, double mu_a, double s_a, double mu_h,
-                            double s_h) {
-  double zh = (x - mu_h) / s_h;
-  double za = (x - mu_a) / s_a;
-  return clampd_cal(0.5 * (zh * zh - za * za) + log(s_h / s_a), -LLR_CLAMP,
-                    LLR_CLAMP);
-}
-
-static double binary_llr_cal(bool present, double p_ai, double p_h) {
-  if (present)
-    return clampd_cal(log(p_ai / p_h), -LLR_CLAMP, LLR_CLAMP);
-  return clampd_cal(log((1.0 - p_ai) / (1.0 - p_h)), -LLR_CLAMP, LLR_CLAMP);
-}
-
-static double prob_from_measurements(const Calibration *cal, double reg,
-                                     double ccr, bool narr, double cond,
-                                     bool decay, bool overwrap, bool namebrk,
-                                     double ident, double func_cv, double ttr,
-                                     double indent) {
-  double s = 0;
-  s += gauss_llr_cal(reg, cal->regularity.mu_ai, cal->regularity.sig_ai,
-                     cal->regularity.mu_h, cal->regularity.sig_h);
-  s += gauss_llr_cal(ccr, cal->ccr.mu_ai, cal->ccr.sig_ai, cal->ccr.mu_h,
-                     cal->ccr.sig_h);
-  s += binary_llr_cal(narr, cal->narr_p_ai, cal->narr_p_h);
-  s += gauss_llr_cal(cond, cal->cond.mu_ai, cal->cond.sig_ai, cal->cond.mu_h,
-                     cal->cond.sig_h);
-  s += binary_llr_cal(decay, cal->decay_p_ai, cal->decay_p_h);
-  s += binary_llr_cal(overwrap, cal->overwrap_p_ai, cal->overwrap_p_h);
-  s += binary_llr_cal(namebrk, cal->namebrk_p_ai, cal->namebrk_p_h);
-  if (ident >= 0)
-    s += gauss_llr_cal(ident, cal->ident.mu_ai, cal->ident.sig_ai,
-                       cal->ident.mu_h, cal->ident.sig_h);
-  if (func_cv >= 0)
-    s += gauss_llr_cal(func_cv, cal->func_cv.mu_ai, cal->func_cv.sig_ai,
-                       cal->func_cv.mu_h, cal->func_cv.sig_h);
-  if (ttr >= 0)
-    s += gauss_llr_cal(ttr, cal->ttr.mu_ai, cal->ttr.sig_ai, cal->ttr.mu_h,
-                       cal->ttr.sig_h);
-  if (indent >= 0)
-    s += gauss_llr_cal(indent, cal->indent.mu_ai, cal->indent.sig_ai,
-                       cal->indent.mu_h, cal->indent.sig_h);
-  return slop_sigmoid(s / cal->temperature);
-}
-
-static int cmd_calibrate(int argc, char **argv) {
-  const char *ai_dir = nullptr, *human_dir = nullptr, *out_dir = ".";
-
-  for (int i = 2; i < argc; i++) {
-    if (strncmp(argv[i], "--ai=", 5) == 0)
-      ai_dir = argv[i] + 5;
-    else if (strcmp(argv[i], "--ai") == 0 && i + 1 < argc)
-      ai_dir = argv[++i];
-    else if (strncmp(argv[i], "--human=", 8) == 0)
-      human_dir = argv[i] + 8;
-    else if (strcmp(argv[i], "--human") == 0 && i + 1 < argc)
-      human_dir = argv[++i];
-    else if (strncmp(argv[i], "--out=", 6) == 0)
-      out_dir = argv[i] + 6;
-    else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
-      return -1;
-  }
-
-  if (!ai_dir || !human_dir) {
-    fprintf(stderr, "slop calibrate --ai <dir> --human <dir> [--out=<dir>]\n");
-    return 1;
-  }
-
-  MeasurementVecs ai, hu;
-  mv_init(&ai);
-  mv_init(&hu);
-
-  printf("  scanning AI files from %s...\n", ai_dir);
-  collect_measurements(ai_dir, &ai);
-  printf("  scanning human files from %s...\n", human_dir);
-  collect_measurements(human_dir, &hu);
-
-  printf("  AI files: %d, Human files: %d\n", ai.reg.count, hu.reg.count);
-  if (ai.reg.count < MIN_CAL_FILES || hu.reg.count < MIN_CAL_FILES) {
-    fprintf(stderr, "slop: need at least %d files per class\n", MIN_CAL_FILES);
-    mv_free(&ai);
-    mv_free(&hu);
-    return 1;
-  }
-
-  Calibration cal;
-  cal.regularity = (GaussParam){dv_mean(&ai.reg), dv_stdev(&ai.reg),
-                                dv_mean(&hu.reg), dv_stdev(&hu.reg)};
-  cal.ccr = (GaussParam){dv_mean(&ai.ccr), dv_stdev(&ai.ccr), dv_mean(&hu.ccr),
-                         dv_stdev(&hu.ccr)};
-  cal.cond = (GaussParam){dv_mean(&ai.cond), dv_stdev(&ai.cond),
-                          dv_mean(&hu.cond), dv_stdev(&hu.cond)};
-  cal.narr_p_ai = dv_mean(&ai.narr);
-  cal.narr_p_h = dv_mean(&hu.narr);
-  cal.decay_p_ai = dv_mean(&ai.decay);
-  cal.decay_p_h = dv_mean(&hu.decay);
-  cal.overwrap_p_ai = dv_mean(&ai.overwrap);
-  cal.overwrap_p_h = dv_mean(&hu.overwrap);
-  cal.namebrk_p_ai = dv_mean(&ai.namebrk);
-  cal.namebrk_p_h = dv_mean(&hu.namebrk);
-  if (cal.narr_p_ai < MIN_BINARY_PROB)
-    cal.narr_p_ai = MIN_BINARY_PROB;
-  if (cal.narr_p_h < MIN_BINARY_PROB)
-    cal.narr_p_h = MIN_BINARY_PROB;
-  if (cal.decay_p_ai < MIN_BINARY_PROB)
-    cal.decay_p_ai = MIN_BINARY_PROB;
-  if (cal.decay_p_h < MIN_BINARY_PROB)
-    cal.decay_p_h = MIN_BINARY_PROB;
-  if (cal.overwrap_p_ai < MIN_BINARY_PROB)
-    cal.overwrap_p_ai = MIN_BINARY_PROB;
-  if (cal.overwrap_p_h < MIN_BINARY_PROB)
-    cal.overwrap_p_h = MIN_BINARY_PROB;
-  if (cal.namebrk_p_ai < MIN_BINARY_PROB)
-    cal.namebrk_p_ai = MIN_BINARY_PROB;
-  if (cal.namebrk_p_h < MIN_BINARY_PROB)
-    cal.namebrk_p_h = MIN_BINARY_PROB;
-  if (ai.ident.count > 0 && hu.ident.count > 0)
-    cal.ident = (GaussParam){dv_mean(&ai.ident), dv_stdev(&ai.ident),
-                             dv_mean(&hu.ident), dv_stdev(&hu.ident)};
-  else {
-    Calibration d;
-    calibration_default(&d);
-    cal.ident = d.ident;
-  }
-  if (ai.func_cv.count > 0 && hu.func_cv.count > 0)
-    cal.func_cv = (GaussParam){dv_mean(&ai.func_cv), dv_stdev(&ai.func_cv),
-                               dv_mean(&hu.func_cv), dv_stdev(&hu.func_cv)};
-  else {
-    Calibration d;
-    calibration_default(&d);
-    cal.func_cv = d.func_cv;
-  }
-  if (ai.ttr.count > 0 && hu.ttr.count > 0)
-    cal.ttr = (GaussParam){dv_mean(&ai.ttr), dv_stdev(&ai.ttr),
-                           dv_mean(&hu.ttr), dv_stdev(&hu.ttr)};
-  else {
-    Calibration d;
-    calibration_default(&d);
-    cal.ttr = d.ttr;
-  }
-  if (ai.indent.count > 0 && hu.indent.count > 0)
-    cal.indent = (GaussParam){dv_mean(&ai.indent), dv_stdev(&ai.indent),
-                              dv_mean(&hu.indent), dv_stdev(&hu.indent)};
-  else {
-    Calibration d;
-    calibration_default(&d);
-    cal.indent = d.indent;
-  }
-  Calibration defaults;
-  calibration_default(&defaults);
-  cal.dup = defaults.dup;
-  cal.git = defaults.git;
-
-  /* Grid search temperature for minimum ECE, reusing score_compute */
-  int total_n = ai.reg.count + hu.reg.count;
-  double *probs = malloc((size_t)total_n * sizeof(double));
-  int *labels = malloc((size_t)total_n * sizeof(int));
-
-  double best_t = DEFAULT_TEMPERATURE, best_ece = 1e9;
-  for (double t = TEMP_GRID_MIN; t <= TEMP_GRID_MAX; t += TEMP_GRID_STEP) {
-    cal.temperature = t;
-    int idx = 0;
-
-    for (int j = 0; j < ai.reg.count; j++) {
-      double id = (j < ai.ident.count) ? ai.ident.vals[j] : -1;
-      double fc = (j < ai.func_cv.count) ? ai.func_cv.vals[j] : -1;
-      double tt = (j < ai.ttr.count) ? ai.ttr.vals[j] : -1;
-      double ind = (j < ai.indent.count) ? ai.indent.vals[j] : -1;
-      probs[idx] = prob_from_measurements(
-          &cal, ai.reg.vals[j], ai.ccr.vals[j], ai.narr.vals[j] > 0.5,
-          ai.cond.vals[j], ai.decay.vals[j] > 0.5, ai.overwrap.vals[j] > 0.5,
-          ai.namebrk.vals[j] > 0.5, id, fc, tt, ind);
-      labels[idx] = 1;
-      idx++;
-    }
-    for (int j = 0; j < hu.reg.count; j++) {
-      double id = (j < hu.ident.count) ? hu.ident.vals[j] : -1;
-      double fc = (j < hu.func_cv.count) ? hu.func_cv.vals[j] : -1;
-      double tt = (j < hu.ttr.count) ? hu.ttr.vals[j] : -1;
-      double ind = (j < hu.indent.count) ? hu.indent.vals[j] : -1;
-      probs[idx] = prob_from_measurements(
-          &cal, hu.reg.vals[j], hu.ccr.vals[j], hu.narr.vals[j] > 0.5,
-          hu.cond.vals[j], hu.decay.vals[j] > 0.5, hu.overwrap.vals[j] > 0.5,
-          hu.namebrk.vals[j] > 0.5, id, fc, tt, ind);
-      labels[idx] = 0;
-      idx++;
-    }
-
-    double ece = compute_ece(probs, labels, total_n, ECE_BIN_COUNT);
-    if (ece < best_ece) {
-      best_ece = ece;
-      best_t = t;
-    }
-  }
-
-  free(probs);
-  free(labels);
-
-  cal.temperature = best_t;
-  cal.loaded = true;
-
-  printf("\n  calibration results:\n");
-  printf("  temperature = %.2f (ECE = %.4f)\n", best_t, best_ece);
-  printf("  regularity: AI(%.3f \xc2\xb1 %.3f) Human(%.3f \xc2\xb1 %.3f)\n",
-         cal.regularity.mu_ai, cal.regularity.sig_ai, cal.regularity.mu_h,
-         cal.regularity.sig_h);
-  printf("  ccr:        AI(%.3f \xc2\xb1 %.3f) Human(%.3f \xc2\xb1 %.3f)\n",
-         cal.ccr.mu_ai, cal.ccr.sig_ai, cal.ccr.mu_h, cal.ccr.sig_h);
-  printf("  cond:       AI(%.3f \xc2\xb1 %.3f) Human(%.3f \xc2\xb1 %.3f)\n",
-         cal.cond.mu_ai, cal.cond.sig_ai, cal.cond.mu_h, cal.cond.sig_h);
-  printf("  ident_spec: AI(%.3f \xc2\xb1 %.3f) Human(%.3f \xc2\xb1 %.3f)\n",
-         cal.ident.mu_ai, cal.ident.sig_ai, cal.ident.mu_h, cal.ident.sig_h);
-  printf("  func_cv:    AI(%.3f \xc2\xb1 %.3f) Human(%.3f \xc2\xb1 %.3f)\n",
-         cal.func_cv.mu_ai, cal.func_cv.sig_ai, cal.func_cv.mu_h,
-         cal.func_cv.sig_h);
-  printf("  ttr:        AI(%.3f \xc2\xb1 %.3f) Human(%.3f \xc2\xb1 %.3f)\n",
-         cal.ttr.mu_ai, cal.ttr.sig_ai, cal.ttr.mu_h, cal.ttr.sig_h);
-  printf("  indent:     AI(%.3f \xc2\xb1 %.3f) Human(%.3f \xc2\xb1 %.3f)\n",
-         cal.indent.mu_ai, cal.indent.sig_ai, cal.indent.mu_h,
-         cal.indent.sig_h);
-  printf("  narration:  p_ai=%.3f p_h=%.3f\n", cal.narr_p_ai, cal.narr_p_h);
-  printf("  decay:      p_ai=%.3f p_h=%.3f\n", cal.decay_p_ai, cal.decay_p_h);
-  printf("  overwrap:   p_ai=%.3f p_h=%.3f\n", cal.overwrap_p_ai,
-         cal.overwrap_p_h);
-  printf("  namebreak:  p_ai=%.3f p_h=%.3f\n", cal.namebrk_p_ai,
-         cal.namebrk_p_h);
-
-  if (calibration_save(&cal, out_dir))
-    printf("\n  saved to %s/.slop-calibration.json\n", out_dir);
-  else
-    fprintf(stderr, "  error: could not save calibration file\n");
-
-  mv_free(&ai);
-  mv_free(&hu);
-
-  printf("\n");
-  return 0;
-}
-
 /* ── Report command ─────────────────────────────────────── */
 
 static void report_divider(void) { print_rule(RULE_W_REPORT); }
@@ -1171,28 +811,32 @@ static void report_methodology(const Calibration *cal) {
   report_header("METHODOLOGY");
   printf(
       "\n"
-      "  The AI slop score uses Bayesian hypothesis testing with\n"
-      "  log-likelihood ratios (LLR). Each signal contributes an LLR:\n\n"
-      "    Gaussian signals:  LLR = 0.5*(z_h^2 - z_a^2) + ln(sig_h/sig_a)\n"
-      "      where z_h = (x - mu_h)/sig_h, z_a = (x - mu_ai)/sig_ai\n\n"
-      "    Binary signals:    LLR = ln(p_ai / p_h)    if present\n"
-      "                       LLR = ln((1-p_ai)/(1-p_h)) otherwise\n\n"
-      "  All LLRs are clamped to [%.1f, +%.1f] to limit any single signal%s.\n"
-      "  The total raw score S = sum of all LLRs.\n\n"
-      "  Temperature scaling (Guo et al. 2017) calibrates the output:\n\n"
-      "    P(AI) = sigmoid(S / T) = 1 / (1 + exp(-S/T))\n\n"
-      "  Temperature T = %.2f%s.\n\n"
-      "  Thresholds: P >= %.2f flagged, P >= %.2f suspicious, P < %.2f likely "
-      "human\n",
+      "  What you are seeing\n\n"
+      "    The slop score (0-10) is built from many small checks on code quality\n"
+      "    (comments, naming, duplicates, layout, optional git history). Each\n"
+      "    check adds a positive or negative statistical weight. Small files\n"
+      "    often show \"n/a\" for some rows until there is enough code to measure.\n\n"
+      "    Full signal list and overlap notes: METRICS.md in the repo.\n\n"
+      "  How the math works\n\n"
+      "    Each row weight is a log-likelihood ratio (LLR):\n\n"
+      "      Gaussian (continuous) measurements:\n"
+      "        LLR = 0.5*(z_h^2 - z_a^2) + ln(sig_h/sig_a)\n\n"
+      "      Binary (present / absent) patterns:\n"
+      "        LLR = ln(p_slop/p_clean) if present\n\n"
+      "    Weights are clamped to [%.1f, +%.1f] so one quirky file cannot dominate%s.\n"
+      "    Raw score S = sum of weights, then:\n\n"
+      "      slop = sigmoid(S / T) * 10\n\n"
+      "    T = %.2f%s.\n\n"
+      "    Labels: >= %.0f sloppy, >= %.0f moderate, >= %.0f mild, else clean.\n",
       cal->loaded ? LLR_CLAMP : LLR_CLAMP_UNCAL,
       cal->loaded ? LLR_CLAMP : LLR_CLAMP_UNCAL,
-      cal->loaded ? "" : " (conservative uncalibrated limit)", cal->temperature,
-      cal->loaded ? " (calibrated)" : " (default)", PROB_FLAGGED,
-      PROB_SUSPICIOUS, PROB_SUSPICIOUS);
+      cal->loaded ? "" : " (default cap)", cal->temperature,
+      cal->loaded ? " (calibrated)" : " (default)",
+      PROB_FLAGGED * 10, PROB_SUSPICIOUS * 10, PROB_INCONCLUSIVE * 10);
 
   printf("\n  Signal parameters:\n");
-  printf("    %-14s %-22s %-22s\n", "signal", "AI (mu +/- sig)",
-         "Human (mu +/- sig)");
+  printf("    %-14s %-22s %-22s\n", "signal", "Sloppy (mu +/- sig)",
+         "Clean (mu +/- sig)");
   printf("  ");
   print_rule(RULE_W_PARAM);
   show_gp("regularity", &cal->regularity);
@@ -1205,23 +849,15 @@ static void report_methodology(const Calibration *cal) {
   show_gp("dup_ratio", &cal->dup);
   show_gp("git_style", &cal->git);
 
-  static const struct {
-    const char *name;
-    double p_ai;
-    double p_h;
-  } bp[] = {
-      {"narration", 0, 0},
-      {"decay", 0, 0},
-      {"over-wrapping", 0, 0},
-      {"naming breaks", 0, 0},
-  };
-  const double bp_ai[] = {cal->narr_p_ai, cal->decay_p_ai, cal->overwrap_p_ai,
-                          cal->namebrk_p_ai};
-  const double bp_h[] = {cal->narr_p_h, cal->decay_p_h, cal->overwrap_p_h,
-                         cal->namebrk_p_h};
+  static const char *bp_names[] = {"narration", "decay", "over-wrapping",
+                                   "naming breaks"};
+  const double bp_slop[] = {cal->narr_p_ai, cal->decay_p_ai,
+                            cal->overwrap_p_ai, cal->namebrk_p_ai};
+  const double bp_clean[] = {cal->narr_p_h, cal->decay_p_h, cal->overwrap_p_h,
+                             cal->namebrk_p_h};
   for (int k = 0; k < 4; k++)
-    printf("    %-14s p_ai=%.3f              p_h=%.3f\n", bp[k].name, bp_ai[k],
-           bp_h[k]);
+    printf("    %-14s p_slop=%.3f            p_clean=%.3f\n", bp_names[k],
+           bp_slop[k], bp_clean[k]);
 }
 
 static double report_single_file(const char *path, const Calibration *cal,
@@ -1250,62 +886,44 @@ static double report_single_file(const char *path, const Calibration *cal,
   printf("  funcs:   %d detected\n", ctx.scan.function_count);
   printf("  lang:    %s\n\n", lang_family_name(ctx.scan.lang));
 
-  printf("  P(AI) = %.3f   [%s]\n", ctx.sc.probability,
-         score_label(ctx.sc.probability));
-  printf("  raw score = %+.2f   temperature = %.2f   scaled = %+.2f\n",
+  printf("  slop score = %.1f / 10   [%s]\n",
+         slop_score_10(ctx.sc.probability), score_label(ctx.sc.probability));
+  printf("  raw = %+.2f   temperature = %.2f   scaled = %+.2f\n",
          ctx.sc.raw_score, ctx.sc.temperature,
          ctx.sc.raw_score / ctx.sc.temperature);
 
-  /* ── Signal breakdown ─────────────────────────────────── */
   report_header("SIGNAL BREAKDOWN");
-  printf(
-      "\n  Each signal contributes a log-likelihood ratio (LLR).\n"
-      "  Positive LLR = evidence for AI.  Negative = evidence for human.\n\n");
-  printf("  %-14s %-20s %-14s %-8s %s\n", "group", "signal", "measured", "LLR",
-         "contribution");
-  print_rule(RULE_W_WIDE);
-
-  double total = 0;
-  for (int i = 0; i < ctx.sc.signal_count; i++) {
-    const SignalDetail *d = &ctx.sc.details[i];
-    total += d->llr;
-    const char *arrow = d->llr > 0.5    ? "<< AI"
-                        : d->llr < -0.5 ? ">> human"
-                                        : "";
-    printf("  %-14s %-20s %-14s %+6.2f   %s\n", d->group, d->signal,
-           d->measured, d->llr, arrow);
-  }
-  print_rule(RULE_W_WIDE);
-  printf("  %36s = %+.2f\n", "sum(LLR)", total);
-  printf("  %36s = %+.2f / %.2f = %+.2f\n", "scaled", total, ctx.sc.temperature,
-         total / ctx.sc.temperature);
-  printf("  %36s = sigmoid(%+.2f) = %.3f\n", "P(AI)",
-         total / ctx.sc.temperature, ctx.sc.probability);
+  printf("\n  Positive weight = more concern; negative = cleaner.  Rows explain "
+         "themselves below.\n");
+  print_signal_table(&ctx.sc, true);
+  printf("  %36s = %+.2f / %.2f = %+.2f\n", "scaled (S/T)", ctx.sc.raw_score,
+         ctx.sc.temperature, ctx.sc.raw_score / ctx.sc.temperature);
+  printf("  %36s = %.1f\n", "slop score", slop_score_10(ctx.sc.probability));
 
   /* ── Smell findings ───────────────────────────────────── */
   SmellReport smell;
   smell_detect(&smell, &ctx.scan, true);
 
-  report_header("SMELL FINDINGS");
+  report_header("FINDINGS");
   if (smell.count == 0) {
-    printf("\n  no smells detected\n");
+    printf("\n  no findings\n");
   } else {
-    int diag = 0, corr = 0, gen = 0;
+    int strong = 0, related = 0, general = 0;
     for (int i = 0; i < smell.count; i++) {
       switch (smell.items[i].severity) {
       case SEV_DIAGNOSTIC:
-        diag++;
+        strong++;
         break;
       case SEV_CORRELATED:
-        corr++;
+        related++;
         break;
       case SEV_GENERAL:
-        gen++;
+        general++;
         break;
       }
     }
-    printf("\n  %d finding%s (%d diagnostic, %d correlated, %d general)\n",
-           smell.count, smell.count == 1 ? "" : "s", diag, corr, gen);
+    printf("\n  %d finding%s (%d strong, %d score-related, %d general)\n",
+           smell.count, smell.count == 1 ? "" : "s", strong, related, general);
     SmellSeverity last_sev = (SmellSeverity)-1;
     for (int i = 0; i < smell.count; i++) {
       const SmellFinding *f = &smell.items[i];
@@ -1366,10 +984,8 @@ static int cmd_report(int argc, char **argv) {
   }
 
   Calibration cal;
-  calibration_default(&cal);
-  (void)calibration_load(&cal, ".");
-
-  const double prior_llr = slop_prior_llr(prior);
+  double prior_llr;
+  scoring_init(&cal, prior, &prior_llr);
 
   struct stat st;
   if (stat(target, &st) != 0) {
@@ -1377,14 +993,8 @@ static int cmd_report(int argc, char **argv) {
     return 1;
   }
 
-  if (!cal.loaded)
-    printf("\n  \xe2\x9a\xa0 UNCALIBRATED (T=%.1f) \xe2\x80\x94 run 'slop "
-           "calibrate' for "
-           "precision\n",
-           cal.temperature);
-
   printf("\n  ============================================================\n");
-  printf("  SLOP REPORT \xe2\x80\x94 AI Slop Detector\n");
+  printf("  SLOP REPORT \xe2\x80\x94 code quality analysis\n");
   printf("  ============================================================\n");
 
   if (S_ISDIR(st.st_mode)) {
@@ -1411,17 +1021,11 @@ static int cmd_report(int argc, char **argv) {
     /* ── Per-file reports ── */
     report_header("PER-FILE ANALYSIS");
 
-    typedef struct {
-      char path[4096];
-      double prob;
-      double score;
-      int dead;
-    } RE;
-    RE *rows = malloc((size_t)fl.count * sizeof(RE));
+    FileEntry *rows = malloc((size_t)fl.count * sizeof(FileEntry));
     int row_count = 0;
     int total_dead = 0;
     int total_smells = 0;
-    int flagged = 0, suspicious = 0, human = 0;
+    int sloppy = 0, moderate = 0, clean = 0;
 
     for (int i = 0; i < fl.count; i++) {
       size_t len = 0;
@@ -1441,37 +1045,34 @@ static int cmd_report(int argc, char **argv) {
       smell_detect(&smell, &ctx.scan, true);
 
       if (row_count < fl.count) {
-        RE *r = &rows[row_count++];
+        FileEntry *r = &rows[row_count++];
         snprintf(r->path, sizeof(r->path), "%s", fl.paths[i]);
         r->prob = ctx.sc.probability;
-        r->score = ctx.sc.raw_score;
-        r->dead = ctx.dead_lines;
+        r->raw_score = ctx.sc.raw_score;
+        r->dead_lines = ctx.dead_lines;
       }
       total_dead += ctx.dead_lines;
       total_smells += smell.count;
 
       if (ctx.sc.probability >= PROB_FLAGGED)
-        flagged++;
+        sloppy++;
       else if (ctx.sc.probability >= PROB_SUSPICIOUS)
-        suspicious++;
+        moderate++;
       else
-        human++;
+        clean++;
 
       if (!json_out) {
         printf("\n  %s\n", fl.paths[i]);
-        printf("    P(AI) = %.3f  [%s]  score = %+.2f", ctx.sc.probability,
+        printf("    slop %.1f/10  [%s]  raw = %+.2f",
+               slop_score_10(ctx.sc.probability),
                score_label(ctx.sc.probability), ctx.sc.raw_score);
         if (ctx.dead_lines > 0)
           printf("  dead = %d", ctx.dead_lines);
         if (smell.count > 0)
-          printf("  smells = %d", smell.count);
+          printf("  findings = %d", smell.count);
         putchar('\n');
 
-        for (int s = 0; s < ctx.sc.signal_count; s++) {
-          const SignalDetail *d = &ctx.sc.details[s];
-          printf("      %-14s %-20s %-12s %+.2f\n", d->group, d->signal,
-                 d->measured, d->llr);
-        }
+        print_signal_table(&ctx.sc, false);
 
         if (smell.count > 0) {
           for (int s = 0; s < smell.count; s++) {
@@ -1489,20 +1090,9 @@ static int cmd_report(int argc, char **argv) {
 
     /* ── Summary table ── */
     report_header("SUMMARY");
-    printf("\n  %-7s %-7s %-5s %s\n", "P(AI)", "score", "dead", "file");
-    print_rule(RULE_W);
-    for (int i = 0; i < row_count; i++) {
-      const RE *r = &rows[i];
-      if (r->dead > 0)
-        printf("  %-7.3f %+6.2f  %-5d %s\n", r->prob, r->score, r->dead,
-               r->path);
-      else
-        printf("  %-7.3f %+6.2f  %-5s %s\n", r->prob, r->score, "-", r->path);
-    }
-    print_rule(RULE_W);
-    printf("\n  %d flagged / %d suspicious / %d likely human\n", flagged,
-           suspicious, human);
-    printf("  %d total smells / %d dead lines across project\n", total_smells,
+    print_file_table(rows, row_count);
+    printf("\n  %d sloppy / %d moderate / %d clean\n", sloppy, moderate, clean);
+    printf("  %d total findings / %d dead lines across project\n", total_smells,
            total_dead);
     if (drr.ratio > 0)
       printf("  dup_ratio = %.2f (%d/%d functions)\n", drr.ratio,
@@ -1522,14 +1112,13 @@ static int cmd_report(int argc, char **argv) {
     report_methodology(&cal);
     printf("\n");
 
-    if (flagged > 0)
+    if (sloppy > 0)
       return 2;
-    if (suspicious > 0)
+    if (moderate > 0)
       return 1;
     return 0;
 
   } else {
-    /* single file */
     double prob = report_single_file(target, &cal, use_git, prior_llr);
     report_methodology(&cal);
     printf("\n");
@@ -1545,36 +1134,32 @@ static int cmd_report(int argc, char **argv) {
 static void usage(void) {
   fprintf(
       stderr,
-      "slop \xe2\x80\x94 AI slop detector\n\n"
+      "slop \xe2\x80\x94 code quality scanner\n\n"
+      "  Catches patterns linters miss: narration comments, dead code,\n"
+      "  naming drift, cross-file duplicates, and more.\n\n"
       "Usage:\n"
-      "  slop smell  [--all] <file|dir>   Find AI-diagnostic code smells\n"
-      "  slop scan   [options] <file|dir>  Estimate AI likelihood (score)\n"
-      "  slop report [options] <file|dir>  Full report with score methodology\n"
-      "  slop dupes  [options] <dir>       Find duplicate functions (NCD)\n"
-      "  slop calibrate --ai <dir> --human <dir>\n\n"
-      "Smell options:\n"
-      "  --all    Include GENERAL smells (zombie params, unused imports, dead "
+      "  slop check  [--all] <file|dir>   Find code quality issues (primary)\n"
+      "  slop scan   [options] <file|dir>  Score files (slop 0-10)\n"
+      "  slop report [options] <file|dir>  Full quality report\n"
+      "  slop dupes  [options] <dir>       Find duplicate functions (NCD)\n\n"
+      "Check options:\n"
+      "  --all    Include general issues (zombie params, unused imports, dead "
       "code)\n\n"
       "Scan options:\n"
       "  --verbose       Show per-file signal breakdown\n"
       "  --json          JSON output\n"
-      "  --git           Include git commit patterns (Group F)\n"
-      "  --prior=N       Prior P(AI), default 0.5\n"
+      "  --git           Include git commit patterns\n"
       "  --stdin --lang=LANG  Read from stdin\n\n"
       "Report options:\n"
-      "  --git           Include git commit patterns\n"
-      "  --prior=N       Prior P(AI), default 0.5\n\n"
+      "  --git           Include git commit patterns\n\n"
       "Dupes options:\n"
       "  --threshold=N   NCD threshold (default 0.30)\n"
       "  --cross-lang    Compare across language families\n\n"
-      "Calibrate:\n"
-      "  --ai <dir>      Directory of known AI-generated files\n"
-      "  --human <dir>   Directory of known human-written files\n"
-      "  --out=<dir>     Output directory (default: .)\n\n"
       "Exit codes:\n"
       "  0  clean\n"
-      "  1  warnings (correlated smells or P > 0.60)\n"
-      "  2  flagged (diagnostic smells, dupes found, or P > 0.85)\n\n"
+      "  1  warnings (moderate findings or slop >= 6)\n"
+      "  2  sloppy (strong tells, dupes found, or slop >= 8.5)\n\n"
+      "Aliases: 'smell' = 'check'\n\n"
       "File filtering:\n"
       "  Respects .gitignore (when in a git repo) and .slopignore\n");
 }
@@ -1595,16 +1180,14 @@ int main(int argc, char **argv) {
     if (strcmp(argv[i], "--stdin") == 0)
       has_stdin = true;
 
-  if (strcmp(cmd, "smell") == 0) {
-    rc = cmd_smell(argc, argv);
+  if (strcmp(cmd, "check") == 0 || strcmp(cmd, "smell") == 0) {
+    rc = cmd_check(argc, argv);
   } else if (strcmp(cmd, "scan") == 0) {
     rc = has_stdin ? cmd_scan_stdin(argc, argv) : cmd_scan(argc, argv);
   } else if (strcmp(cmd, "report") == 0) {
     rc = cmd_report(argc, argv);
   } else if (strcmp(cmd, "dupes") == 0) {
     rc = cmd_dupes(argc, argv);
-  } else if (strcmp(cmd, "calibrate") == 0) {
-    rc = cmd_calibrate(argc, argv);
   } else if (strcmp(cmd, "--version") == 0 || strcmp(cmd, "-V") == 0) {
     printf("slop %s\n", SLOP_VERSION);
     return 0;
@@ -1614,7 +1197,7 @@ int main(int argc, char **argv) {
     return 0;
   } else {
     fprintf(stderr, "slop: unknown command '%s'\n", cmd);
-    fprintf(stderr, "Commands: smell, scan, report, dupes, calibrate\n");
+    fprintf(stderr, "Commands: check, scan, report, dupes\n");
     return 1;
   }
 

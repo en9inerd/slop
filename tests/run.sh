@@ -49,46 +49,50 @@ printf "\n  slop integration tests\n  ──────────────
 # ── Help ──────────────────────────────────────────────────
 run "$SLOP" --help
 check_exit "help flag" 0
-check_contains "help output" "AI slop detector"
+check_contains "help output" "code quality scanner"
 
-# ── Smell: AI file ────────────────────────────────────────
+# ── Check: AI file ────────────────────────────────────────
+run "$SLOP" check "$FIXTURES/ai_example.ts"
+check_exit "check ai_example.ts" 2
+check_contains "check finds narration" "narration"
+check_contains "check finds comment-decay" "comment-decay"
+check_contains "check finds over-wrap" "over-wrap"
+check_contains "check 15 findings" "15 finding"
+
+# ── Check: human file (clean) ────────────────────────────
+run "$SLOP" check "$FIXTURES/human_example.go"
+check_exit "check human_example.go" 0
+check_contains "check human clean" "no issues found"
+
+# ── Check: Go error suppression ──────────────────────────
+run "$SLOP" check "$FIXTURES/go_err.go"
+check_exit "check go_err.go" 1
+check_contains "check finds err-suppress" "err-suppress"
+
+# ── Check: TS directives and as-any ──────────────────────
+run "$SLOP" check "$FIXTURES/dupes_a.ts"
+check_exit "check dupes_a.ts" 1
+check_contains "check finds as-any" "as-any"
+check_contains "check finds ts-directive" "ts-directive"
+
+# ── Smell alias ──────────────────────────────────────────
 run "$SLOP" smell "$FIXTURES/ai_example.ts"
-check_exit "smell ai_example.ts" 2
-check_contains "smell finds narration" "narration"
-check_contains "smell finds comment-decay" "comment-decay"
-check_contains "smell finds over-wrap" "over-wrap"
-check_contains "smell 15 findings" "15 finding"
+check_exit "smell alias works" 2
 
-# ── Smell: human file (clean) ────────────────────────────
-run "$SLOP" smell "$FIXTURES/human_example.go"
-check_exit "smell human_example.go" 0
-check_contains "smell human clean" "no smells found"
-
-# ── Smell: Go error suppression ──────────────────────────
-run "$SLOP" smell "$FIXTURES/go_err.go"
-check_exit "smell go_err.go" 1
-check_contains "smell finds err-suppress" "err-suppress"
-
-# ── Smell: TS directives and as-any ──────────────────────
-run "$SLOP" smell "$FIXTURES/dupes_a.ts"
-check_exit "smell dupes_a.ts" 1
-check_contains "smell finds as-any" "as-any"
-check_contains "smell finds ts-directive" "ts-directive"
-
-# ── Scan: AI file scored suspicious+ ─────────────────────
+# ── Scan: AI file scored moderate+ ────────────────────────
 run "$SLOP" scan "$FIXTURES/ai_example.ts"
 check_exit "scan ai_example.ts" 1
 
 run "$SLOP" scan --json "$FIXTURES/ai_example.ts"
-check_contains "scan ai json has probability" "probability"
-check_contains "scan ai suspicious+" "suspicious"
+check_contains "scan ai json has slop_score" "slop_score"
+check_contains "scan ai moderate+" "moderate"
 
-# ── Scan: human file scored likely human ─────────────────
+# ── Scan: human file scored clean ────────────────────────
 run "$SLOP" scan "$FIXTURES/human_example.go"
 check_exit "scan human_example.go" 0
 
 run "$SLOP" scan --json "$FIXTURES/human_example.go"
-check_contains "scan human json label" "likely human"
+check_contains "scan human json label" "clean"
 
 # ── Scan: directory mode ─────────────────────────────────
 run "$SLOP" scan "$FIXTURES"
@@ -102,7 +106,7 @@ check_contains "scan verbose has narration" "narration"
 # ── Scan: stdin mode ─────────────────────────────────────
 LAST_EXIT=0
 echo 'function foo() { return 1; }' | "$SLOP" scan --stdin --json --lang=js > "$OUT" 2>&1 || LAST_EXIT=$?
-check_contains "scan stdin" "probability"
+check_contains "scan stdin" "slop_score"
 
 # ── Dupes: finds cross-file duplicates ───────────────────
 run "$SLOP" dupes "$FIXTURES"
@@ -116,9 +120,9 @@ run "$SLOP" report "$FIXTURES/ai_example.ts"
 check_exit "report ai_example.ts" 1
 check_contains "report has SCORE section" "SCORE"
 check_contains "report has SIGNAL BREAKDOWN" "SIGNAL BREAKDOWN"
-check_contains "report has SMELL FINDINGS" "SMELL FINDINGS"
+check_contains "report has FINDINGS" "FINDINGS"
 check_contains "report has METHODOLOGY" "METHODOLOGY"
-check_contains "report shows LLR formula" "sigmoid"
+check_contains "report shows formula" "sigmoid"
 check_contains "report shows dead code" "dead"
 
 # ── Report: directory ──────────────────────────────────────
@@ -135,23 +139,23 @@ if [ -d "$REAL" ]; then
 
 run "$SLOP" scan "$REAL"
 check_exit "real scan no false positives" 0
-check_contains "real scan all human" "0 flagged"
-check_contains "real scan no suspicious" "0 suspicious"
+check_contains "real scan all clean" "0 sloppy"
+check_contains "real scan no moderate" "0 moderate"
 check_contains "real scan file count" "scanned 48 file"
 check_contains "real scan dead lines" "dead lines detected"
 check_contains "real scan includes dist" "scanned 48"
 
 run "$SLOP" scan "$REAL/telebuilder/src/utils.ts"
-check_contains "real scan likely human" "likely human"
+check_contains "real scan clean" "clean"
 
-run "$SLOP" smell "$REAL"
-check_exit "real smell finds issues" 2
-check_contains "real smell comment-decay" "comment-decay"
-check_contains "real smell naming-break" "naming-break"
+run "$SLOP" check "$REAL"
+check_exit "real check finds issues" 2
+check_contains "real check comment-decay" "comment-decay"
+check_contains "real check naming-break" "naming-break"
 
-run "$SLOP" smell --all "$REAL"
-check_contains "real smell-all dead code" "dead-code"
-check_contains "real smell-all unused import" "unused-import"
+run "$SLOP" check --all "$REAL"
+check_contains "real check-all dead code" "dead-code"
+check_contains "real check-all unused import" "unused-import"
 check_excludes "real no constructor FP" "constructor() defined but never"
 
 run "$SLOP" dupes "$REAL"
@@ -166,7 +170,7 @@ check_contains "real report has overview" "PROJECT OVERVIEW"
 check_contains "real report has signals" "regularity"
 
 run "$SLOP" scan --json "$REAL/telebuilder/src/utils.ts"
-check_contains "real scan json" "probability"
+check_contains "real scan json" "slop_score"
 
 run "$SLOP" scan --verbose "$REAL/telebuilder/src/utils.ts"
 check_contains "real scan verbose" "comment-to-code"
@@ -204,7 +208,7 @@ function buildUrl(base: string): string {
     return url;
 }
 FIXTURE
-run "$SLOP" smell /tmp/slop_ec_strurl.ts
+run "$SLOP" check /tmp/slop_ec_strurl.ts
 check_excludes "url string not narration" "narration"
 
 cat > /tmp/slop_ec_narrmid.ts << 'FIXTURE'
@@ -214,7 +218,7 @@ cat > /tmp/slop_ec_narrmid.ts << 'FIXTURE'
 // Next-gen features
 function setup() { return true; }
 FIXTURE
-run "$SLOP" smell /tmp/slop_ec_narrmid.ts
+run "$SLOP" check /tmp/slop_ec_narrmid.ts
 check_exit "narration mid-word no match" 0
 
 cat > /tmp/slop_ec_narrhit.ts << 'FIXTURE'
@@ -223,7 +227,7 @@ cat > /tmp/slop_ec_narrhit.ts << 'FIXTURE'
 // Finally, send response
 function handler() { return true; }
 FIXTURE
-run "$SLOP" smell /tmp/slop_ec_narrhit.ts
+run "$SLOP" check /tmp/slop_ec_narrhit.ts
 check_exit "narration match exit=2" 2
 check_contains "narration finds 3" "3 findings"
 
@@ -233,7 +237,7 @@ function check(obj: any) {
     if (obj.data !== null) { console.log("b"); }
 }
 FIXTURE
-run "$SLOP" smell /tmp/slop_ec_nullts.ts
+run "$SLOP" check /tmp/slop_ec_nullts.ts
 check_contains "redundant null TS" "redundant null check"
 
 cat > /tmp/slop_ec_nilgo.go << 'FIXTURE'
@@ -243,7 +247,7 @@ func run(err error) {
     if err != nil { return }
 }
 FIXTURE
-run "$SLOP" smell /tmp/slop_ec_nilgo.go
+run "$SLOP" check /tmp/slop_ec_nilgo.go
 check_contains "redundant nil Go" "redundant null check"
 
 cat > /tmp/slop_ec_nonepy.py << 'FIXTURE'
@@ -254,7 +258,7 @@ def process(data):
     if data is None:
         return
 FIXTURE
-run "$SLOP" smell /tmp/slop_ec_nonepy.py
+run "$SLOP" check /tmp/slop_ec_nonepy.py
 check_contains "redundant None Python" "redundant null check on 'data'"
 
 cat > /tmp/slop_ec_maingo.go << 'FIXTURE'
@@ -263,14 +267,14 @@ import "fmt"
 func main() { fmt.Println("hello") }
 func init() { fmt.Println("init") }
 FIXTURE
-run "$SLOP" smell --all /tmp/slop_ec_maingo.go
+run "$SLOP" check --all /tmp/slop_ec_maingo.go
 check_exit "main/init not dead" 0
 
 cat > /tmp/slop_ec_export.ts << 'FIXTURE'
 export function helper(): string { return "exported"; }
 export default function main(): void { console.log("main"); }
 FIXTURE
-run "$SLOP" smell --all /tmp/slop_ec_export.ts
+run "$SLOP" check --all /tmp/slop_ec_export.ts
 check_exit "export not dead" 0
 
 cat > /tmp/slop_ec_ctor.ts << 'FIXTURE'
@@ -278,7 +282,7 @@ class Foo {
     constructor(x: number) { this.x = x; }
 }
 FIXTURE
-run "$SLOP" smell --all /tmp/slop_ec_ctor.ts
+run "$SLOP" check --all /tmp/slop_ec_ctor.ts
 check_excludes "constructor not dead" "constructor() defined"
 
 cat > /tmp/slop_ec_static.c << 'FIXTURE'
@@ -301,7 +305,7 @@ int main(void) {
     return 0;
 }
 FIXTURE
-run "$SLOP" smell --all /tmp/slop_ec_static.c
+run "$SLOP" check --all /tmp/slop_ec_static.c
 check_contains "C static dead code" "unused_internal"
 check_excludes "C non-static not dead" "public_api() defined"
 
@@ -310,8 +314,8 @@ run "$SLOP" scan /tmp/slop_ec_emptydir
 check_exit "empty dir scan" 0
 run "$SLOP" dupes /tmp/slop_ec_emptydir
 check_exit "empty dir dupes" 0
-run "$SLOP" smell /tmp/slop_ec_emptydir
-check_exit "empty dir smell" 0
+run "$SLOP" check /tmp/slop_ec_emptydir
+check_exit "empty dir check" 0
 
 run "$SLOP" scan /tmp/sad_does_not_exist_ever.ts
 check_exit "nonexistent file" 1

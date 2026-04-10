@@ -1,10 +1,10 @@
-# slop — AI slop detector
+# slop — code quality scanner
 
-Fast CLI tool that finds AI-typical code defects and estimates whether code
-was AI-generated. Built on information theory, statistical heuristics, and
-raw math. No neural networks, no API calls, no ML models, no token embeddings.
+Fast CLI tool that catches code quality patterns linters miss: narration
+comments, dead code, naming drift, cross-file duplicates, and more.
+No neural networks, no API calls, no cloud. Single static binary.
 
-Written in C23. Built with Zig. Single static binary. ~5,130 lines of C.
+Written in C23. Built with Zig. Zero dependencies at runtime.
 
 ## Table of Contents
 
@@ -15,11 +15,10 @@ Written in C23. Built with Zig. Single static binary. ~5,130 lines of C.
   - [Build from Source](#build-from-source)
 - [Quick Start](#quick-start)
 - [Commands](#commands)
-  - [slop smell](#slop-smell)
+  - [slop check](#slop-check)
   - [slop scan](#slop-scan)
   - [slop report](#slop-report)
   - [slop dupes](#slop-dupes)
-  - [slop calibrate](#slop-calibrate)
 - [Detection Algorithms](#detection-algorithms)
   - [Narration Comments](#narration-comments)
   - [Comment Density Gradient](#comment-density-gradient)
@@ -42,10 +41,7 @@ Written in C23. Built with Zig. Single static binary. ~5,130 lines of C.
 - [CI Integration](#ci-integration)
 - [Library API](#library-api)
 - [Cross-Compilation](#cross-compilation)
-- [Calibration](#calibration)
-  - [Without Calibration](#without-calibration-default)
-  - [With Calibration](#with-calibration)
-  - [Calibration Internals](#calibration-internals)
+- [Tuning](#tuning)
   - [Default Parameter Reference](#default-parameter-reference)
 - [Honest Assessment](#honest-assessment)
 - [Project Structure](#project-structure)
@@ -81,7 +77,7 @@ pre-installed on macOS and most Linux distros).
 ```bash
 make              # debug build
 make release      # optimized build
-make test         # run 85 integration tests
+make test         # run 86 integration tests
 make install      # install to /usr/local (binary + library + header)
 ```
 
@@ -99,42 +95,44 @@ The Makefile is a thin wrapper — every target delegates to `zig build`.
 ## Quick Start
 
 ```bash
-# Find AI code smells (zero calibration needed, most actionable)
-slop smell ./src/
+# Find code quality issues (primary command)
+slop check ./src/
 
 # Find duplicate functions across a project
 slop dupes ./src/
 
-# Estimate AI likelihood and rank files
+# Score files by overall code quality (0-10 slop score)
 slop scan ./src/
 
-# Full report with methodology explanation
+# Full quality report with methodology explanation
 slop report ./src/handler.ts
 ```
 
 ## Commands
 
 ```
-slop smell  [--all] <file|dir>              Find AI-diagnostic code smells
-slop scan   [options] <file|dir>            Estimate AI likelihood (score)
-slop report [options] <file|dir>            Full report with methodology
+slop check  [--all] <file|dir>              Find code quality issues (primary)
+slop scan   [options] <file|dir>            Score files (slop 0-10)
+slop report [options] <file|dir>            Full quality report
 slop dupes  [options] <dir>                 Find duplicate functions (NCD)
-slop calibrate --ai <dir> --human <dir>     Fit parameters from labeled data
 ```
 
-### slop smell
+Aliases: `smell` = `check`.
 
-Finds patterns that are strong evidence of AI-generated code. Works on
-single files or entire directories. Three severity levels:
+### slop check
 
-**DIAGNOSTIC** — near-zero false positive rate, no existing linter catches these:
+Finds code quality patterns that standard linters miss. Works on single
+files or entire directories. Three severity levels:
+
+**Strong tells** — near-zero false positive rate, not caught by existing linters:
 
 - **Narration comments** — "First we...", "Now we...", "Step 1:..." at the
-  start of comment text. The single most reliable AI code fingerprint.
+  start of comment text. Comments that narrate the obvious rather than
+  explaining intent.
 - **Comment density gradient** — comment density drops 3x+ between the first
-  and second half of the code body. Direct consequence of attention decay.
+  and second half of the code body. Indicates uneven attention.
 
-**CORRELATED** — more common in AI code, but not exclusive:
+**Score-related** — common quality issues that also affect the slop score:
 
 - **Redundant re-implementation** — two functions in the same file with
   NCD < 0.30 (near-duplicate bodies, ≥ 200 bytes each).
@@ -148,7 +146,7 @@ single files or entire directories. Three severity levels:
 - **`_ = err` suppression** (Go) — discarded error return values, including
   multi-return `result, _ := func()` patterns.
 
-**GENERAL** (behind `--all` flag) — real smells that AI accelerates, but linters catch better:
+**General** (behind `--all` flag) — real issues that other linters may also catch:
 
 - **Zombie parameters** — function parameters never referenced in the body.
 - **Unused imports** — imported names not used elsewhere in the file.
@@ -160,81 +158,77 @@ single files or entire directories. Three severity levels:
 
 | Flag | Description |
 |------|-------------|
-| `--all` | Include GENERAL smells (zombie params, unused imports, dead code) |
+| `--all` | Include general issues (zombie params, unused imports, dead code) |
 
 ```
-$ slop smell src/api/handlers.ts
+$ slop check src/api/handlers.ts
 
   src/api/handlers.ts — 15 findings
 
-  DIAGNOSTIC
+  strong tell
   :1   narration        "// First, we import the necessary modules"
   :6   narration        "// Now we define the interface for our handler"
   :13  narration        "// Step 1: Create the validation function"
   —    comment-decay    top half 20% comments, bottom half 5% (gradient 4.0x)
 
-  CORRELATED
+  score-related
   :56  over-wrap        try/catch nested 3 deep in createUser()
 
-$ slop smell --all src/
+$ slop check --all src/
   12 files scanned, 4 with findings (23 total)
 ```
 
 ### slop scan
 
-Estimates P(AI) using Bayesian log-likelihood ratios across up to thirteen
-signal groups (9 Gaussian, 4 binary).
+Scores files using statistical checks across up to thirteen signal groups
+(9 Gaussian, 4 binary). Output is a **slop score from 0 to 10**: higher = sloppier.
 
-| Group | Signal | Type | What it measures |
-|-------|--------|------|-----------------|
-| A | Regularity | Gaussian | Compression ratio, line-length entropy, line-length CV |
-| B1 | Comment ratio | Gaussian | Comment lines / code lines |
-| B2 | Narration | Binary | Count of narration-style comments (≥3 = present) |
-| C | Conditional density | Gaussian | Conditional keyword density |
-| D1 | Position | Binary | Quality decay over file position (Spearman ρ) |
-| D2 | Over-wrapping | Binary | Defensive over-wrapping detected (try/catch depth >2 or redundant null checks) |
-| D3 | Naming break | Binary | Mixed naming conventions within a function |
-| G | Identifier specificity | Gaussian | Ratio of generic names (data, result, handler...) to total identifiers |
-| H | Function length CV | Gaussian | Coefficient of variation of function body lengths |
-| I | Token diversity (TTR) | Gaussian | Unique identifiers / total identifiers (type-token ratio) |
-| J | Indentation regularity | Gaussian | CV of leading whitespace depths — AI code is more uniform |
-| E | Dupes | Gaussian | Duplicate function ratio across project (directory mode only) |
-| F | Git | Gaussian | Commit message patterns (opt-in with `--git`) |
+| Signal | Type | What it measures |
+|--------|------|-----------------|
+| Regularity | Gaussian | Compression ratio, line-length entropy, line-length CV |
+| Comment ratio | Gaussian | Comment lines / code lines |
+| Narration | Binary | Count of narration-style comments (≥3 = present) |
+| Conditional density | Gaussian | Conditional keyword density |
+| Quality decay | Binary | Defect/comment trend over file position (Spearman ρ) |
+| Over-wrapping | Binary | Defensive over-wrapping (try/catch depth >2 or redundant null checks) |
+| Naming break | Binary | Mixed naming conventions within a function |
+| Identifier specificity | Gaussian | Ratio of generic names to total identifiers |
+| Function length CV | Gaussian | Coefficient of variation of function body lengths |
+| Token diversity (TTR) | Gaussian | Unique identifiers / total identifiers |
+| Indentation regularity | Gaussian | CV of leading whitespace depths |
+| Dupes | Gaussian | Duplicate function ratio across project (directory mode only) |
+| Git | Gaussian | Commit message patterns (opt-in with `--git`) |
 
 **Directory mode** performs a two-pass scan: pass 1 collects all functions
 and computes the project-wide duplicate ratio via NCD, pass 2 scores each
-file using the real `dup_ratio` so that cross-file duplication properly
-influences per-file probabilities.
+file using the real `dup_ratio`.
 
 | Flag | Description |
 |------|-------------|
-| `--verbose` | Per-file signal breakdown |
+| `--verbose` | Per-file signal breakdown with explanations |
 | `--json` | JSON output (for CI pipelines and tooling) |
-| `--git` | Include git commit patterns (Group F) |
-| `--prior=N` | Prior P(AI), default 0.5. Overrides the uninformative prior. `--prior=0.7` adds +0.85 to every file's raw score. |
+| `--git` | Include git commit patterns |
 | `--stdin --lang=LANG` | Read from stdin (`js`, `ts`, `go`, `python`, `shell`) |
 
 ```
 $ slop scan --verbose src/api/handlers.ts
 
-  ⚠ UNCALIBRATED (T=2.0) — run 'slop calibrate' for precision
+  src/api/handlers.ts — slop 7.9/10  [moderate]
 
-  src/api/handlers.ts — score +2.71  P(AI) = 0.795  [suspicious]
-
-  group          signal               measured       LLR
-  ------------------------------------------------------------
-  regularity     composite            0.22           -1.49
-  comments       comment-to-code      0.19           +0.56
-  comments       narration            yes (13 hits)  +1.50
-  structure      conditional dens.    0.09           -0.43
-  position       quality decay        detected       +1.50
-  patterns       over-wrapping        1 hit          +1.50
-  patterns       naming breaks        none           -0.14
-  naming         ident. specificity   0.18 (26/146)  +1.50
-  structure      func length CV       0.75 (5 funcs) -0.85
-  naming         token diversity      0.33 (48/146)  +0.34
-  whitespace     indent regularity    0.84 (70 lines) -1.29
-  ------------------------------------------------------------
+  Check (category / name)                  Value              weight
+  ------------------------------------------------------------------
+  regularity / composite                   0.22               -1.49
+  comments / comment-to-code               0.19               +0.56
+  comments / narration                     yes (13 hits)      +1.50
+  structure / conditional dens.            0.09               -0.43
+  position / quality decay                 detected           +1.50
+  patterns / over-wrapping                 1 hit              +1.50
+  patterns / naming breaks                 none               -0.14
+  naming / ident. specificity              0.18 (26/146)      +1.50
+  structure / func length CV               0.75 (5 funcs)     -0.85
+  naming / token diversity                 0.33 (48/146)      +0.34
+  whitespace / indent regularity           0.84 (70 lines)    -1.29
+  ------------------------------------------------------------------
                              raw total +2.71
                            scaled (/T) +1.35
 
@@ -243,28 +237,27 @@ $ slop scan ./src/
   scanned 48 files
   dup_ratio = 0.05 (7/142 functions)
 
-  P(AI)   score   dead  file
+  slop    raw     dead  file
   ------------------------------------------------------------
-  0.949   +5.83   13    src/api/handlers.ts
-  0.847   +3.46   -     src/utils/format.ts
+  9.5     +5.83   13    src/api/handlers.ts
+  8.5     +3.46   -     src/utils/format.ts
   ...
-  0.062   -5.44   14    src/helpers/input.helper.ts
+  0.6     -5.44   14    src/helpers/input.helper.ts
   ------------------------------------------------------------
 
-  3 flagged (P > 0.85) / 5 suspicious (0.60-0.85) / 40 likely human
+  3 sloppy / 5 moderate / 40 clean
   267 dead lines detected across project
 ```
 
 ### slop report
 
-Full report combining all analyses with methodology explanation. Includes
-per-file signal breakdown, smell findings, dead code, dupes, and the
+Full quality report combining all analyses with methodology explanation.
+Includes per-file signal breakdown, findings, dead code, dupes, and the
 scoring formula.
 
 | Flag | Description |
 |------|-------------|
 | `--git` | Include git commit patterns |
-| `--prior=N` | Prior P(AI), default 0.5 |
 
 ### slop dupes
 
@@ -290,33 +283,6 @@ $ slop dupes ./src/
     src/api/auth.ts:30       validateToken()    [12 lines]
     src/middleware/auth.ts:15 checkAuth()        [14 lines]
 ```
-
-### slop calibrate
-
-Fits empirical Gaussian parameters and optimal temperature from labeled data.
-
-| Flag | Description |
-|------|-------------|
-| `--ai <dir>` | Directory of known AI-generated files |
-| `--human <dir>` | Directory of known human-written files |
-| `--out=<dir>` | Output directory for calibration file (default: `.`) |
-
-```
-$ slop calibrate --ai ./known-ai-code/ --human ./known-human-code/
-
-  scanning AI files from ./known-ai-code/...
-  scanning human files from ./known-human-code/...
-  AI files: 120, Human files: 85
-
-  calibration results:
-  temperature = 1.40 (ECE = 0.0321)
-  regularity: AI(0.52 ± 0.13) Human(0.38 ± 0.16)
-  ccr:        AI(0.28 ± 0.11) Human(0.13 ± 0.09)
-
-  saved to ./.slop-calibration.json
-```
-
-Recommended: ≥ 50 files per class for stable μ/σ, ≥ 200 for reliable temperature.
 
 ---
 
@@ -431,14 +397,14 @@ functions fall out of the model's effective attention window.
 Given observed measurements **x** = (x₁...xₙ):
 
 ```
-                P(AI)              P(xᵢ | AI)
-S = log ──────────── +  Σᵢ log ────────────
-                P(H)               P(xᵢ | H)
-         └─────┬─────┘      └──────┬───────┘
+              P(slop)            P(xᵢ | slop)
+S = log ──────────── +  Σᵢ log ──────────────
+              P(clean)           P(xᵢ | clean)
+         └─────┬─────┘      └──────┬────────┘
            prior s₀          signal LLR sᵢ
 ```
 
-Default prior: P(AI) = 0.5 (uninformative). s₀ = log(0.5/0.5) = 0, so the
+Default prior: P(slop) = 0.5 (uninformative). s₀ = log(0.5/0.5) = 0, so the
 prior term vanishes. Override with `--prior=0.7` to add s₀ = +0.85 to every
 file's raw score.
 
@@ -453,24 +419,24 @@ sᵢ(x) =  ½ · ⎢ ────────── − ────────
 **Binary signal (present/absent):**
 
 ```
-                    p_AI                       1 − p_AI
-sᵢ(1) = log ────────────       sᵢ(0) = log ────────────
-                    p_H                        1 − p_H
+                   p_slop                      1 − p_slop
+sᵢ(1) = log ────────────       sᵢ(0) = log ──────────────
+                   p_clean                     1 − p_clean
 ```
 
 **LLR clamping** prevents any single signal from dominating:
 
 | Mode | Clamp range | When active |
 |------|-------------|-------------|
-| Calibrated | ±3.0 (`LLR_CLAMP`) | `.slop-calibration.json` loaded and valid |
-| Uncalibrated | ±1.5 (`LLR_CLAMP_UNCAL`) | No calibration file (default) |
+| Tuned | ±3.0 (`LLR_CLAMP`) | `.slop-calibration.json` loaded and valid |
+| Default | ±1.5 (`LLR_CLAMP_UNCAL`) | No calibration file |
 | No compression | ±1.5 (`LLR_CLAMP_NOCOMPR`) | File < 500 bytes (regularity signal unreliable) |
 | Small file | ±1.0 (`LLR_CLAMP_SMALL`) | Files < 50 lines |
 
-The uncalibrated clamp (±1.5) is deliberately conservative: since all μ/σ/p
+The default clamp (±1.5) is deliberately conservative: since all μ/σ/p
 values are educated guesses, limiting individual LLR prevents a single
-mis-estimated signal from producing extreme P(AI) values. After calibration,
-the wider ±3.0 range is safe because parameters are empirically fit.
+mis-estimated signal from producing extreme scores. With a tuning file,
+the wider ±3.0 clamp allows stronger signals to have more influence.
 
 ### Signal Groups (A–J)
 
@@ -487,10 +453,10 @@ r_norm = 1 − clamp((R − 0.10) / 0.35, 0, 1)
 h_norm = 1 − clamp((H_norm − 0.30) / 0.60, 0, 1)
 c_norm = 1 − clamp((CV − 0.15) / 0.75, 0, 1)
 
-regularity = (r_norm + h_norm + c_norm) / 3       ∈ [0,1], higher = more AI
+regularity = (r_norm + h_norm + c_norm) / 3       ∈ [0,1], higher = more sloppy
 ```
 
-Default parameters: AI(μ=0.50, σ=0.18), Human(μ=0.20, σ=0.13).
+Default parameters: Sloppy(μ=0.50, σ=0.18), Clean(μ=0.20, σ=0.13).
 
 Weakest signal group — formatters (prettier, black, gofmt) homogenize code
 and reduce the gap. Grouped into a single composite so it can't contribute
@@ -506,7 +472,7 @@ Where `code_lines = total_lines − blank_lines − comment_lines`. Lines with
 trailing comments (`x = 5 // init`) count as code, not comment. Guard: if
 `code_lines = 0`, skip all signals and report "insufficient code."
 
-Default parameters: AI(μ=0.25, σ=0.15), Human(μ=0.04, σ=0.10).
+Default parameters: Sloppy(μ=0.25, σ=0.15), Clean(μ=0.04, σ=0.10).
 
 **Group B2 — Narration** (1 binary LLR, confidence: HIGHEST)
 
@@ -517,7 +483,7 @@ has_narration = 1  if narration_match_count ≥ 3
 Count-based, not ratio-based: 3+ distinct narration comments is strong
 evidence regardless of total comment count.
 
-Default parameters: p_AI = 0.40, p_H = 0.01.
+Default parameters: p_slop = 0.40, p_clean = 0.01.
 LLR when present: log(0.40/0.01) = +3.69 (clamped to LLR_CLAMP).
 LLR when absent: log(0.60/0.99) = −0.50.
 
@@ -530,13 +496,13 @@ CD = count(if, else, elif, switch, case, match) / code_lines
 Only keyword occurrences — NOT ternary `?` (ambiguous with optional
 chaining `?.` in JS/TS).
 
-Default parameters: AI(μ=0.18, σ=0.10), Human(μ=0.10, σ=0.10).
+Default parameters: Sloppy(μ=0.18, σ=0.10), Clean(μ=0.10, σ=0.10).
 
 **Minimum keyword threshold:** If a file contains fewer than 3 conditional
 keywords (`if`, `else`, `elif`, `switch`, `case`, `match`), the conditional
 density signal is skipped entirely (LLR=0, status "n/a"). This prevents
 small utility files and DB CRUD code with few conditionals from receiving a
-strong negative LLR that incorrectly drags P(AI) down.
+strong negative LLR that incorrectly drags the score down.
 
 Wide σ (0.10 for both classes) reflects that conditional density is language-
 dependent — C code with heavy control flow naturally has higher density than
@@ -564,11 +530,11 @@ quality_decay = 1 if EITHER condition fires:
 Condition B ensures the DIAGNOSTIC smell (comment decay) also contributes
 to the probability score.
 
-Default parameters: p_AI = 0.25, p_H = 0.05.
+Default parameters: p_slop = 0.25, p_clean = 0.05.
 
 **Group D2 — Over-wrapping score** (1 binary LLR, confidence: MEDIUM-HIGH)
 
-Fires when `slop smell` detects defensive over-wrapping patterns:
+Fires when `slop check` detects defensive over-wrapping patterns:
 try/catch nesting >2 levels deep, or redundant null checks on the same
 variable within 10 lines.
 
@@ -576,31 +542,31 @@ variable within 10 lines.
 has_overwrap = 1  if overwrap_count ≥ 1
 ```
 
-Default parameters: p_AI = 0.18, p_H = 0.01.
+Default parameters: p_slop = 0.18, p_clean = 0.01.
 LLR when present: log(0.18/0.01) = +2.89 (clamped to LLR_CLAMP).
 LLR when absent: log(0.82/0.99) = −0.19.
 
 This is a **pattern-based signal** — it doesn't depend on Gaussian μ/σ
-estimates, making it less sensitive to calibration errors.
+estimates, making it less sensitive to parameter tuning.
 
 **Group D3 — Naming break score** (1 binary LLR, confidence: MEDIUM)
 
-Fires when `slop smell` detects mixed naming conventions (camelCase +
+Fires when `slop check` detects mixed naming conventions (camelCase +
 snake_case, each >25% share) within a single function.
 
 ```
 has_namebrk = 1  if naming_break_count ≥ 1
 ```
 
-Default parameters: p_AI = 0.15, p_H = 0.02.
+Default parameters: p_slop = 0.15, p_clean = 0.02.
 LLR when present: log(0.15/0.02) = +2.01.
 LLR when absent: log(0.85/0.98) = −0.14.
 
-Also pattern-based — less calibration-dependent.
+Also pattern-based — less sensitive to parameter tuning.
 
 **Group G — Identifier specificity** (1 Gaussian LLR, confidence: MEDIUM-HIGH)
 
-AI models over-use generic variable names: `data`, `result`, `response`,
+Sloppy code over-uses generic variable names: `data`, `result`, `response`,
 `handler`, `value`, `config`, `options`, `params`, `callback`, `helper`,
 `manager`, `service`, `controller`, `processor`, etc. (38 entries in the
 dictionary).
@@ -612,12 +578,12 @@ ident_spec = generic_identifiers / total_identifiers
 Skipped if the file has fewer than 20 identifiers (`MIN_IDENTIFIERS`).
 Keywords and ALL_CAPS constants are excluded from the count.
 
-Default parameters: AI(μ=0.18, σ=0.08), Human(μ=0.07, σ=0.04).
+Default parameters: Sloppy(μ=0.18, σ=0.08), Clean(μ=0.07, σ=0.04).
 
 **Group H — Function length CV** (1 Gaussian LLR, confidence: MEDIUM)
 
-AI tends to produce functions of similar length (low variance). Human code
-has more natural variation — some short helpers, some long complex functions.
+Sloppy code tends to have functions of similar length (low variance). Clean
+code has more natural variation — some short helpers, some long complex functions.
 
 ```
 CV = stdev(function_line_counts) / mean(function_line_counts)
@@ -625,12 +591,12 @@ CV = stdev(function_line_counts) / mean(function_line_counts)
 
 Skipped if fewer than 5 functions detected (`MIN_FUNCS_CV`).
 
-Default parameters: AI(μ=0.40, σ=0.20), Human(μ=0.90, σ=0.35).
+Default parameters: Sloppy(μ=0.40, σ=0.20), Clean(μ=0.90, σ=0.35).
 
 **Group I — Token diversity (TTR)** (1 Gaussian LLR, confidence: MEDIUM-HIGH)
 
-Type-Token Ratio measures naming vocabulary richness. AI code reuses the
-same identifiers more often, producing lower TTR. Human code tends to use
+Type-Token Ratio measures naming vocabulary richness. Sloppy code reuses the
+same identifiers more often, producing lower TTR. Clean code tends to use
 more diverse, context-specific names.
 
 ```
@@ -640,7 +606,7 @@ TTR = unique_identifiers / total_identifiers
 Unique identifiers are tracked via an FNV-1a hash set (2048 buckets).
 Skipped if fewer than 50 identifier tokens (`MIN_TTR_TOKENS`).
 
-Default parameters: AI(μ=0.35, σ=0.15), Human(μ=0.40, σ=0.20).
+Default parameters: Sloppy(μ=0.35, σ=0.15), Clean(μ=0.40, σ=0.20).
 
 Wide σ and close means reflect that TTR is language-dependent — C/Go code
 naturally reuses identifiers heavily (producing TTR 0.11–0.39 in human code),
@@ -652,11 +618,11 @@ for source code identifier analysis.
 
 **Group J — Indentation regularity** (1 Gaussian LLR, confidence: HIGH)
 
-AI-generated code has very uniform indentation — consistent depth, regular
-blank-line spacing. Human code has more organic variation. This is the
+Sloppy code has very uniform indentation — consistent depth, regular
+blank-line spacing. Clean code has more organic variation. This is the
 strongest whitespace-based signal, validated by Nirob et al. 2025
 ("Whitespaces Don't Lie") as the #1 discriminative feature for
-distinguishing human from AI code.
+distinguishing clean from sloppy code.
 
 ```
 indent_cv = stdev(leading_whitespace_per_code_line) / mean(leading_whitespace_per_code_line)
@@ -666,8 +632,8 @@ Leading whitespace is counted in spaces (tabs = 4 spaces). Only non-blank
 code lines are included. Skipped if fewer than 15 code lines
 (`MIN_INDENT_LINES`).
 
-Default parameters: AI(μ=0.45, σ=0.22), Human(μ=0.70, σ=0.25).
-Low CV = uniform indentation = more AI-like. High CV = varied = more human.
+Default parameters: Sloppy(μ=0.45, σ=0.22), Clean(μ=0.70, σ=0.25).
+Low CV = uniform indentation = more sloppy. High CV = varied = more clean.
 
 **Group E — Duplicate ratio** (1 Gaussian LLR, confidence: HIGHEST)
 
@@ -675,7 +641,7 @@ Low CV = uniform indentation = more AI-like. High CV = varied = more human.
 dup_ratio = |{functions with NCD < 0.3 match elsewhere}| / |{all functions}|
 ```
 
-Default parameters: AI(μ=0.22, σ=0.12), Human(μ=0.10, σ=0.15).
+Default parameters: Sloppy(μ=0.22, σ=0.12), Clean(μ=0.10, σ=0.15).
 
 σ_H = 0.15 reflects that human codebases DO have some duplication — legacy
 code, test boilerplate, copy-paste during refactoring. The wide σ prevents
@@ -705,7 +671,7 @@ l_norm = clamp((l − 10) / 190, 0, 1)
 git_score = (m_norm + c_norm + l_norm) / 3
 ```
 
-Default parameters: AI(μ=0.55, σ=0.20), Human(μ=0.25, σ=0.22).
+Default parameters: Sloppy(μ=0.55, σ=0.20), Clean(μ=0.25, σ=0.22).
 
 ### Temperature Scaling
 
@@ -713,12 +679,12 @@ Following Guo et al. 2017, the raw score is divided by temperature T
 before applying sigmoid:
 
 ```
-P(AI) = σ(S / T) = 1 / (1 + exp(−S/T))
+score = σ(S / T) = 1 / (1 + exp(−S/T))
 ```
 
 - T = 1.0: standard naive Bayes (overconfident with correlated signals)
-- T = 2.0: recommended default for uncalibrated mode (halves confidence)
-- T is learned during calibration by minimizing Expected Calibration Error
+- T = 2.0: recommended default (halves confidence)
+- T can be overridden via `.slop-calibration.json`
 
 **Why temperature scaling:** Naive Bayes assumes signal independence. Our
 signals ARE grouped to reduce correlation, but residual correlation remains
@@ -730,7 +696,7 @@ single temperature parameter corrects the overall confidence level.
 File: 180 lines, directory mode. Measurements: regularity=0.45, CCR=0.20,
 4 narration hits, CD=0.11, quality decay present, overwrap detected,
 no naming breaks, ident_spec=0.15, func_cv=0.50, TTR=0.30,
-indent_cv=0.50, dup_ratio=0.08. **Uncalibrated** (LLR clamp = ±1.5).
+indent_cv=0.50, dup_ratio=0.08. **Default mode** (LLR clamp = ±1.5).
 
 **Group A (regularity=0.45):**
 
@@ -801,10 +767,10 @@ s_E = 0.5×[(0.08−0.10)²/0.15² − (0.08−0.22)²/0.12²] + log(0.15/0.12)
 ```
 S_raw = 1.49 + 0.82 + 1.50 + (−0.24) + 1.50 + 1.50 + (−0.14)
       + 1.24 + 1.09 + 0.36 + 0.42 + (−0.45) = +9.08
-P(AI) = σ(9.08 / 2.0) = σ(4.54) = 0.989
+score = σ(9.08 / 2.0) = σ(4.54) = 0.989
 ```
 
-99% AI — narration, decay, and overwrap each hit the +1.50 clamp.
+slop 9.9/10 — narration, decay, and overwrap each hit the +1.50 clamp.
 Identifier specificity (+1.24) and function length CV (+1.09) add strong
 evidence. TTR (+0.36) and indent (+0.42) contribute moderate evidence —
 these signals are deliberately tuned with wide σ to avoid false positives
@@ -826,12 +792,12 @@ s_E  = 0                         (single file, skipped)
 
 S_raw = 1.49 + 0.82 + (−0.50) + (−0.24) + (−0.24) + (−0.19) + (−0.14)
       + (−0.91) + (−0.40) + 0.18 + (−0.27) = −0.40
-P(AI) = σ(−0.40 / 2.0) = σ(−0.20) = 0.450
+score = σ(−0.40 / 2.0) = σ(−0.20) = 0.450
 ```
 
-45% — "inconclusive." Only structural signals, nothing diagnostic. Without
+slop 4.5/10 — "mild." Only structural signals, nothing diagnostic. Without
 binary pattern signals, the Gaussian signals alone can't produce a confident
-classification.
+result.
 
 **Pure human file** — low regularity, sparse comments, no pattern signals,
 diverse naming, varied indentation:
@@ -850,20 +816,20 @@ TTR=0.55        → s_I  = −0.32
 indent_cv=0.80  → s_J  = −1.06
 
 S_raw = −8.87
-P(AI) = σ(−8.87 / 2.0) = σ(−4.44) = 0.012
+score = σ(−8.87 / 2.0) = σ(−4.44) = 0.012
 ```
 
-1% = "likely human." All eleven signals point toward human origin. The
+slop 0.1/10 — "clean." All eleven signals point toward clean code. The
 strongest contributors are ident specificity, func_cv, and regularity
 (all hitting the −1.50 clamp).
 
 **Temperature matters.** Without it (T=1.0), the borderline case gives
-P(AI) = σ(−0.40) = 0.402 — technically "likely human" but barely. With
-T=2.0 it gives 0.450, appropriately inconclusive.
+σ(−0.40) = 0.402 (slop 4.0) — technically "clean" but barely. With
+T=2.0 it gives 0.450 (slop 4.5), appropriately "mild."
 
-**Clamping matters.** With calibrated clamp (±3.0), the narration signal in
+**Clamping matters.** With tuned clamp (±3.0), the narration signal in
 the first example would contribute +3.69 instead of +1.50, producing a much
-higher raw score. The conservative ±1.5 clamp keeps uncalibrated scores
+higher raw score. The conservative ±1.5 default clamp keeps scores
 realistic.
 
 ---
@@ -999,19 +965,19 @@ languages. Detection is by file extension. Unknown extensions → C-like.
 ## Exit Codes
 
 ```
-0  clean     — no diagnostic smells, no dupes, P(AI) < 0.60
-1  warnings  — correlated smells found, or P(AI) 0.60–0.85
-2  flagged   — diagnostic smells, dupes found, or P(AI) > 0.85
+0  clean     — no strong tells, no dupes, slop < 6
+1  warnings  — moderate findings, or slop 6–8.5
+2  sloppy    — strong tells, dupes found, or slop > 8.5
 ```
 
 ## CI Integration
 
 ```bash
-# Fail CI if any AI diagnostic smells are found
-slop smell ./src/ || exit 1
+# Fail CI if any strong quality issues are found
+slop check ./src/ || exit 1
 
-# Fail CI if any file scores above 85% AI probability
-slop scan --json ./src/ | jq '.flagged' | grep -q '^0$' || exit 1
+# Fail CI if any file scores above 8.5/10
+slop scan ./src/ && echo "clean" || echo "issues found"
 
 # Scan only files changed in last commit
 git diff --name-only HEAD~1 | xargs slop scan
@@ -1048,17 +1014,17 @@ opts.include_general_smells = true;
 opts.prior = 0.5;
 
 SlopFileResult fr = slop_analyze_file("handler.ts", &opts);
-printf("P(AI) = %.3f, smells = %d, dead lines = %d\n",
-       fr.probability, fr.smells.count, fr.dead_lines);
+printf("slop = %.1f / 10, findings = %d, dead lines = %d\n",
+       fr.probability * 10.0, fr.smells.count, fr.dead_lines);
 slop_file_result_free(&fr);
 
 SlopProjectResult pr = slop_analyze_dir("./src/", &opts);
-printf("Files: %d, flagged: %d, dup_ratio: %.2f\n",
-       pr.file_count, pr.flagged, pr.dup_ratio);
+printf("Files: %d, sloppy: %d, dup_ratio: %.2f\n",
+       pr.file_count, pr.sloppy, pr.dup_ratio);
 for (int i = 0; i < pr.file_count; i++) {
     SlopFileResult *f = &pr.files[i];
     if (!f->skipped)
-        printf("  %s — P(AI)=%.3f\n", f->filepath, f->probability);
+        printf("  %s — slop %.1f/10\n", f->filepath, f->probability * 10.0);
 }
 slop_project_result_free(&pr);
 ```
@@ -1067,9 +1033,9 @@ slop_project_result_free(&pr);
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `include_general_smells` | `bool` | `false` | Include GENERAL-severity smells |
+| `include_general_smells` | `bool` | `false` | Include general-severity findings |
 | `use_git` | `bool` | `false` | Include git commit pattern signal |
-| `prior` | `double` | `0.5` | P(AI) prior (0.5 = uninformative) |
+| `prior` | `double` | `0.5` | Prior probability (0.5 = uninformative) |
 | `calibration_dir` | `const char *` | `nullptr` | Path to dir containing `.slop-calibration.json` |
 
 ### SlopFileResult
@@ -1077,10 +1043,10 @@ slop_project_result_free(&pr);
 | Field | Type | Description |
 |-------|------|-------------|
 | `filepath` | `char[4096]` | File path |
-| `probability` | `double` | P(AI) score (0.0–1.0) |
+| `probability` | `double` | Slop probability (0.0–1.0; multiply by 10 for slop score) |
 | `raw_score` | `double` | Raw Bayesian log-odds |
 | `dead_lines` | `int` | Lines of dead/unused code |
-| `smells` | `SmellReport` | Individual smell findings |
+| `smells` | `SmellReport` | Individual findings |
 | `score` | `ScoreResult` | Per-signal breakdown |
 | `total_lines` | `int` | Total line count |
 | `code_lines` | `int` | Code lines (non-blank, non-comment) |
@@ -1100,9 +1066,9 @@ slop_project_result_free(&pr);
 | `funcs_in_dup` | `int` | Functions involved in duplicates |
 | `total_funcs` | `int` | Total functions extracted |
 | `dupes` | `DupeResult` | Full duplicate cluster data |
-| `flagged` | `int` | Files with P(AI) > 0.85 |
-| `suspicious` | `int` | Files with P(AI) 0.60–0.85 |
-| `human` | `int` | Files with P(AI) < 0.60 |
+| `sloppy` | `int` | Files with slop >= 8.5 |
+| `moderate` | `int` | Files with slop 6.0–8.5 |
+| `clean` | `int` | Files with slop < 6.0 |
 | `skipped` | `int` | Files skipped |
 
 ### Building with libslop
@@ -1134,63 +1100,22 @@ All targets produce a single static binary with no runtime dependencies.
 
 > **Note:** Windows is not supported — the tool relies on POSIX APIs (`popen`, `strdup`) for git integration and file walking.
 
-## Calibration
+## Tuning
 
-### Without calibration (default)
+All signal parameters (μ, σ, p) ship as educated defaults. T=2.0 and
+LLR_CLAMP=±1.5 prevent overconfidence. **Treat the slop score as a ranking**,
+not a calibrated probability.
 
-All signal parameters (μ, σ, p) ship as educated guesses. T=2.0 and
-LLR_CLAMP=±1.5 are used to prevent overconfidence.
-
-| Component | Without calibration |
-|-----------|-------------------|
-| `slop smell` | Full accuracy — pattern matching, fixed thresholds |
-| `slop dupes` | Full accuracy — NCD is pure math |
+| Component | Accuracy |
+|-----------|----------|
+| `slop check` | Full — pattern matching, fixed thresholds |
+| `slop dupes` | Full — NCD is pure math |
 | `slop scan` ranking | Good — signal directions are correct |
-| `slop scan` P(AI) number | Directionally correct, not a true probability |
-| `slop scan` thresholds | Noisy — 0.58 vs 0.62 is meaningless |
-| LLR clamp | ±1.5 (no single signal contributes more than 1.5 nats) |
-| Temperature | 2.0 (halves raw score before sigmoid) |
+| `slop scan` score | Directional; 5.8 vs 6.2 is meaningless |
 
-**Treat uncalibrated P(AI) as a ranking score**, not a calibrated probability.
-The ±1.5 clamp ensures that even with mis-estimated parameters, no single
-signal can push P(AI) above ~0.82 on its own.
-
-### With calibration
-
-```bash
-slop calibrate --ai ./known-ai-files/ --human ./known-human-files/
-```
-
-Replaces guessed constants with empirical μ/σ per signal and finds the
-optimal temperature via ECE minimization. LLR clamp widens to ±3.0 (signals
-from real data are trusted more). After calibration, P(AI) = 0.70
-approximates a 70% true positive rate.
-
-**Where to get labeled data:**
-- AI corpus: agent-submitted PRs (AIDev dataset), or generate code for known tasks with Claude/Copilot/Cursor
-- Human corpus: pre-2022 GitHub repos (before widespread AI coding tools)
-
-### Calibration Internals
-
-**Steps:**
-1. Scan all provided files, extract measurements per signal group
-2. Compute empirical μ and σ for each signal under each class
-3. Grid search temperature T (0.5 to 5.0, step 0.1) minimizing ECE
-4. Write `.slop-calibration.json`
-
-**Expected Calibration Error:**
-
-```
-          M
-ECE = Σ  (|Bₘ| / N) · |accuracy(Bₘ) − confidence(Bₘ)|
-         m=1
-```
-
-Where samples are binned into M=10 confidence bins Bₘ, accuracy(Bₘ) is the
-fraction truly AI in that bin, confidence(Bₘ) is the mean predicted P(AI).
-ECE = 0 means perfectly calibrated.
-
-**Calibration JSON schema:**
+To tune signal weights for your codebase, create a `.slop-calibration.json`
+file in your project root (or pass `--calibration-dir`). When loaded,
+LLR clamp widens to ±3.0 (trusting your parameters more).
 
 ```json
 {
@@ -1218,17 +1143,16 @@ ECE = 0 means perfectly calibrated.
 }
 ```
 
-**Validation on load:** The calibration loader rejects malformed JSON silently
-(falls back to defaults). Sigma values are clamped to ≥ 0.01 and binary
-probabilities to ≥ 0.01 to prevent division-by-zero. Temperature < 0.1 or
-missing falls back to 2.0. At least 3 Gaussian signals must have non-trivial
-sigma (> 0.01) for the file to be accepted as valid.
+**Validation on load:** Malformed JSON silently falls back to defaults.
+Sigma values are clamped to ≥ 0.01, binary probabilities to ≥ 0.01.
+Temperature < 0.1 falls back to 2.0. At least 3 Gaussian signals must
+have non-trivial sigma (> 0.01) for the file to be accepted.
 
 ### Default Parameter Reference
 
-All parameters below ship as defaults and are replaced by `slop calibrate`.
-They are defined as `#define` constants in `slop.h` and runtime values in
-`score.c:calibration_default()`.
+All parameters below ship as defaults and can be overridden via
+`.slop-calibration.json`. They are defined as `#define` constants in
+`slop.h` and runtime values in `score.c:calibration_default()`.
 
 ---
 
@@ -1238,42 +1162,38 @@ They are defined as `#define` constants in `slop.h` and runtime values in
 |----------|---------|-------|-------------|
 | `temperature` | 2.0 | ≥0.1 | Divides raw LLR sum before sigmoid. Higher = less confident output. |
 
-**What it controls:** The mapping from raw score to P(AI).
+**What it controls:** The mapping from raw score to slop score.
 At T=1.0, the model is a standard naive Bayes classifier (overconfident
 when signals are correlated). At T=2.0, every raw score is halved before
 applying sigmoid, making the output more conservative.
 
-**How calibration sets it:** Grid search over T ∈ [0.5, 5.0] in steps of
-0.1, minimizing Expected Calibration Error (ECE) on the labeled dataset.
-Typical calibrated values: T ≈ 1.2–1.8.
-
-**When to hand-tune:** If you have calibrated but P(AI) scores feel too
-confident (many files at 0.95+), increase T. If scores cluster near 0.5
-and you want more decisive output, decrease T.
+**When to hand-tune:** If scores feel too confident (many files at 9.5+),
+increase T in `.slop-calibration.json`. If scores cluster near 5.0 and
+you want more decisive output, decrease T.
 
 ---
 
 #### Gaussian Signal Parameters
 
 Each Gaussian signal has four parameters that define two normal distributions —
-one for "AI-generated" code, one for "human-written" code:
+one for "sloppy" code, one for "clean" code:
 
 | Parameter | Meaning |
 |-----------|---------|
-| `mu_ai` | Expected (mean) value of the measurement in AI-generated code |
-| `sigma_ai` | Standard deviation of the measurement in AI-generated code |
-| `mu_h` | Expected (mean) value of the measurement in human-written code |
-| `sigma_h` | Standard deviation of the measurement in human-written code |
+| `mu_ai` | Expected (mean) value of the measurement in sloppy code |
+| `sigma_ai` | Standard deviation of the measurement in sloppy code |
+| `mu_h` | Expected (mean) value of the measurement in clean code |
+| `sigma_h` | Standard deviation of the measurement in clean code |
 
 The LLR formula computes how much more likely the observed measurement is
-under the AI hypothesis vs. the human hypothesis:
+under the sloppy hypothesis vs. the clean hypothesis:
 
 ```
 LLR = 0.5 × [(x − μ_H)²/σ_H² − (x − μ_AI)²/σ_AI²] + ln(σ_H/σ_AI)
 ```
 
-Measurements close to μ_AI produce positive LLR (AI evidence). Measurements
-close to μ_H produce negative LLR (human evidence). The σ values control
+Measurements close to μ_AI produce positive LLR (sloppy evidence). Measurements
+close to μ_H produce negative LLR (clean evidence). The σ values control
 sensitivity — smaller σ means the signal is more decisive near its mean
 but penalizes outliers more harshly.
 
@@ -1281,10 +1201,10 @@ but penalizes outliers more harshly.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.50 | AI code is more uniform (consistent formatting, repetitive structure) |
-| `sigma_ai` | 0.18 | Wide — AI regularity varies with formatter usage |
-| `mu_h` | 0.20 | Human code is less uniform (organic style, varying line lengths) |
-| `sigma_h` | 0.13 | Narrower — humans consistently have lower regularity |
+| `mu_ai` | 0.50 | Sloppy code is more uniform (consistent formatting, repetitive structure) |
+| `sigma_ai` | 0.18 | Wide — regularity varies with formatter usage |
+| `mu_h` | 0.20 | Clean code is less uniform (organic style, varying line lengths) |
+| `sigma_h` | 0.13 | Narrower — clean code consistently has lower regularity |
 
 Composite of three sub-measurements, each normalized to [0,1] and averaged:
 
@@ -1300,17 +1220,17 @@ c_norm = 1 − clamp((CV − 0.15) / 0.75, 0, 1)
 regularity = (r_norm + h_norm + c_norm) / 3
 ```
 
-Higher regularity = more AI-like. Weakest signal group — formatters
+Higher regularity = more sloppy. Weakest signal group — formatters
 (prettier, black, gofmt) homogenize code and inflate human regularity.
 
 **Signal: `ccr`** — comment-to-code ratio
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.25 | AI produces ~25% comment lines relative to code |
-| `sigma_ai` | 0.15 | Wide — varies by prompt style and model |
-| `mu_h` | 0.04 | Humans average ~4% comment density |
-| `sigma_h` | 0.10 | Some human code is heavily commented (libraries, APIs) |
+| `mu_ai` | 0.25 | Sloppy code has ~25% comment lines relative to code |
+| `sigma_ai` | 0.15 | Wide — varies by generation style |
+| `mu_h` | 0.04 | Clean code averages ~4% comment density |
+| `sigma_h` | 0.10 | Some clean code is heavily commented (libraries, APIs) |
 
 Measured as: `comment_lines / max(code_lines, 1)`. Lines with trailing
 comments count as code. Guard: if `code_lines = 0`, all signals are skipped.
@@ -1319,9 +1239,9 @@ comments count as code. Guard: if `code_lines = 0`, all signals are skipped.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.18 | AI uses more branching (defensive coding, verbose logic) |
+| `mu_ai` | 0.18 | Sloppy code uses more branching (defensive coding, verbose logic) |
 | `sigma_ai` | 0.10 | Wide — language-dependent, C code naturally has higher density |
-| `mu_h` | 0.10 | Humans use fewer conditionals on average |
+| `mu_h` | 0.10 | Clean code uses fewer conditionals on average |
 | `sigma_h` | 0.10 | Wide — C parsers/state machines can be much higher |
 
 Counts keywords: `if`, `else`, `elif`, `else if`, `switch`, `case`, `match`.
@@ -1335,10 +1255,10 @@ AI-generated TypeScript, so the signal provides only mild directional evidence.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.22 | AI frequently regenerates similar functions |
+| `mu_ai` | 0.22 | Sloppy code frequently contains similar functions |
 | `sigma_ai` | 0.12 | Wide — depends on file count and project structure |
-| `mu_h` | 0.10 | Human code has some duplication (legacy, test boilerplate) |
-| `sigma_h` | 0.15 | Wide — Go test boilerplate and legacy code inflate human dup ratio |
+| `mu_h` | 0.10 | Clean code has some duplication (legacy, test boilerplate) |
+| `sigma_h` | 0.15 | Wide — Go test boilerplate and legacy code inflate dup ratio |
 
 Only active in directory mode. Measured as:
 `|functions with NCD < 0.3 match| / |all functions ≥ 200 bytes|`.
@@ -1348,10 +1268,10 @@ Skipped for single-file scans (no project context).
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.55 | AI agents produce formulaic commit messages |
-| `sigma_ai` | 0.20 | Varies by agent configuration |
-| `mu_h` | 0.25 | Human commits are more varied |
-| `sigma_h` | 0.22 | Wide — some humans use conventional commits rigorously |
+| `mu_ai` | 0.55 | Sloppy commits tend to be formulaic |
+| `sigma_ai` | 0.20 | Varies by tooling configuration |
+| `mu_h` | 0.25 | Clean commits are more varied |
+| `sigma_h` | 0.22 | Wide — some developers use conventional commits rigorously |
 
 **Opt-in only** (`--git` flag). Disabled by default because git commits
 describe the *committer*, not the *code author*. When humans commit AI code
@@ -1361,10 +1281,10 @@ describe the *committer*, not the *code author*. When humans commit AI code
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.18 | AI uses more generic names (data, result, handler, etc.) |
-| `sigma_ai` | 0.08 | Moderate — consistent across AI models |
-| `mu_h` | 0.07 | Humans use fewer generic names proportionally |
-| `sigma_h` | 0.04 | Narrow — humans consistently pick specific names |
+| `mu_ai` | 0.18 | Sloppy code uses more generic names (data, result, handler, etc.) |
+| `sigma_ai` | 0.08 | Moderate — consistent pattern |
+| `mu_h` | 0.07 | Clean code uses fewer generic names proportionally |
+| `sigma_h` | 0.04 | Narrow — clean code consistently uses specific names |
 
 Measured as: `generic_identifiers / total_identifiers`. Dictionary of 38
 generic names. Skipped if fewer than 20 identifiers (`MIN_IDENTIFIERS`).
@@ -1373,9 +1293,9 @@ generic names. Skipped if fewer than 20 identifiers (`MIN_IDENTIFIERS`).
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.40 | AI produces functions of similar length (low variance) |
+| `mu_ai` | 0.40 | Sloppy code has functions of similar length (low variance) |
 | `sigma_ai` | 0.20 | Moderate spread |
-| `mu_h` | 0.90 | Human code has diverse function lengths (high variance) |
+| `mu_h` | 0.90 | Clean code has diverse function lengths (high variance) |
 | `sigma_h` | 0.35 | Wide — project-dependent |
 
 Measured as: `stdev(function_line_counts) / mean(function_line_counts)`.
@@ -1385,9 +1305,9 @@ Skipped if fewer than 5 functions detected (`MIN_FUNCS_CV`).
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.35 | AI reuses identifiers more (lower vocabulary richness) |
+| `mu_ai` | 0.35 | Sloppy code reuses identifiers more (lower vocabulary richness) |
 | `sigma_ai` | 0.15 | Wide — varies by language and project |
-| `mu_h` | 0.40 | Modest separation from AI — C/Go code has low TTR naturally |
+| `mu_h` | 0.40 | Modest separation — C/Go code has low TTR naturally |
 | `sigma_h` | 0.20 | Wide — C code TTR (0.11–0.28) is naturally lower than JS/Python |
 
 Measured as: `unique_identifiers / total_identifiers`. Unique tracking via
@@ -1401,9 +1321,9 @@ tight parameters would cause false positives on human systems code.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mu_ai` | 0.45 | AI produces very uniform indentation (low CV) |
-| `sigma_ai` | 0.22 | Wide — deeply nested JS/TS code has higher indent CV even in AI code |
-| `mu_h` | 0.70 | Human indentation is more varied (higher CV) |
+| `mu_ai` | 0.45 | Sloppy code has very uniform indentation (low CV) |
+| `sigma_ai` | 0.22 | Wide — deeply nested JS/TS code has higher indent CV |
+| `mu_h` | 0.70 | Clean code has more varied indentation (higher CV) |
 | `sigma_h` | 0.25 | Wide — depends on project structure and style |
 
 Measured as: `stdev(leading_spaces_per_line) / mean(leading_spaces_per_line)`.
@@ -1421,12 +1341,12 @@ high indent CV that overlaps with the human distribution.
 #### Binary Signal Parameters
 
 Each binary signal has two parameters — the probability of the pattern
-appearing in AI code vs. human code:
+appearing in sloppy code vs. clean code:
 
 | Parameter | Meaning |
 |-----------|---------|
-| `p_ai` | P(pattern present \| AI-generated code) |
-| `p_h` | P(pattern present \| human-written code) |
+| `p_ai` | P(pattern present \| sloppy code) |
+| `p_h` | P(pattern present \| clean code) |
 
 LLR when present: `ln(p_ai / p_h)`. LLR when absent: `ln((1−p_ai) / (1−p_h))`.
 The ratio `p_ai / p_h` is the discrimination factor.
@@ -1498,17 +1418,17 @@ raise `namebrk_p_h` to 0.05–0.10.
 
 ---
 
-#### Fixed Thresholds (not calibrated)
+#### Fixed Thresholds
 
-These thresholds are hardcoded in `slop.h` and NOT replaced by calibration.
-They control when detectors fire and how signals are clamped:
+These thresholds are hardcoded in `slop.h` and not overridden by the
+tuning file. They control when detectors fire and how signals are clamped:
 
 **LLR clamping:**
 
 | Constant | Value | When active |
 |----------|-------|-------------|
-| `LLR_CLAMP` | ±3.0 | Calibrated mode |
-| `LLR_CLAMP_UNCAL` | ±1.5 | Uncalibrated mode (default) |
+| `LLR_CLAMP` | ±3.0 | Tuned mode (calibration file loaded) |
+| `LLR_CLAMP_UNCAL` | ±1.5 | Default mode |
 | `LLR_CLAMP_NOCOMPR` | ±1.5 | File < 500 bytes (compression unreliable) |
 | `LLR_CLAMP_SMALL` | ±1.0 | File < 50 lines |
 
@@ -1516,11 +1436,11 @@ They control when detectors fire and how signals are clamped:
 
 | Constant | Value | Label |
 |----------|-------|-------|
-| `PROB_FLAGGED` | 0.85 | P(AI) above this → "likely AI" (exit code 2) |
-| `PROB_SUSPICIOUS` | 0.60 | P(AI) above this → "suspicious" (exit code 1) |
-| `PROB_INCONCLUSIVE` | 0.40 | P(AI) above this → "inconclusive" |
+| `PROB_FLAGGED` | 0.85 | slop >= 8.5 → "sloppy" (exit code 2) |
+| `PROB_SUSPICIOUS` | 0.60 | slop >= 6.0 → "moderate" (exit code 1) |
+| `PROB_INCONCLUSIVE` | 0.40 | slop >= 4.0 → "mild" |
 
-**Smell detector thresholds:**
+**Finding detector thresholds:**
 
 | Constant | Value | What it controls |
 |----------|-------|-----------------|
@@ -1544,90 +1464,41 @@ They control when detectors fire and how signals are clamped:
 | `NULL_CHECK_WINDOW` | 10 | Lines within which duplicate null checks are flagged |
 | `MAX_AVG_LINE_LEN` | 200 | Average line length above this → file is minified |
 
-**Calibration process constants:**
+**Calibration file loading:**
 
 | Constant | Value | What it controls |
 |----------|-------|-----------------|
-| `MIN_CAL_FILES` | 10 | Minimum files per class for calibration to proceed |
-| `ECE_BIN_COUNT` | 10 | Number of confidence bins for ECE computation |
-| `TEMP_GRID_MIN` | 0.5 | Temperature grid search lower bound |
-| `TEMP_GRID_MAX` | 5.0 | Temperature grid search upper bound |
-| `TEMP_GRID_STEP` | 0.1 | Temperature grid search step size |
 | `MIN_GAUSS_SIGMA` | 0.01 | Floor for loaded sigma values (prevents div-by-zero) |
 | `MIN_BINARY_PROB` | 0.01 | Floor for loaded probability values |
 
 ---
 
-#### How Calibration Replaces Parameters
-
-When you run `slop calibrate --ai <dir> --human <dir>`:
-
-1. **Gaussian parameters** — the tool scans all files, measures regularity,
-   CCR, conditional density, identifier specificity, function length CV,
-   token diversity, and indentation regularity for each file, then computes
-   empirical μ and σ for each signal under each class (AI vs human). Dup
-   and git parameters keep their defaults (dup requires directory context,
-   git is opt-in). These replace the defaults above.
-
-2. **Binary parameters** — the tool counts how many AI files vs human files
-   have narration ≥3, quality decay, overwrap, and naming breaks.
-   The ratios become the new p_AI and p_H values.
-
-3. **Temperature** — grid search finds the T that minimizes ECE on the
-   combined dataset.
-
-4. All values are written to `.slop-calibration.json`. When `slop scan`
-   finds this file (in the current directory or `--calibration-dir`), it
-   loads the values and switches to the wider ±3.0 LLR clamp.
-
-**Minimum dataset:** ≥10 files per class required. ≥50 files per class
-recommended for stable μ/σ. ≥200 files per class for reliable temperature.
 
 ## Honest Assessment
 
-**What's well-grounded:**
-- Narration comments — near-pathognomonic for AI, no linter catches this
-- NCD for duplicates — proven technology (Cilibrasi & Vitanyi 2005), proven problem
-- Bayesian framework — mathematically correct, temperature scaling addresses overconfidence
-- Comment density gradient — measures a real consequence of attention decay
+**What this tool is good at:**
+- Narration comments — no other linter catches "First, we validate the input"
+- NCD for duplicates — proven technology (Cilibrasi & Vitanyi 2005), genuinely useful
+- Comment density gradient — measures real uneven effort across a file
+- Redundant null checks, over-wrapping — real code hygiene issues
+- Speed — sub-second on real projects, no cloud, no config
 
-**What needs real data to validate:**
-- Gaussian μ/σ defaults are empirically informed (derived from human-written code
-  distributions) but AI-side parameters are still domain-knowledge estimates —
-  calibrate with labeled data to replace them
-- Binary p_AI values are estimated from AI code patterns observed in practice,
-  but not formally measured — calibration replaces these too
-- Compression ratio signal is weakened by formatters (prettier, black, gofmt)
-- Quality gradient requires visible decay markers (TODOs, empty catches) to fire
-- Temperature T=2.0 is chosen conservatively; real T should be learned via ECE
-- Indentation regularity (strongest whitespace signal) can be affected by
-  auto-formatters that enforce uniform indent — similar to the regularity problem
-
-**The Gaussian model is technically wrong** for bounded signals like CCR ∈ [0,∞)
-and regularity ∈ [0,1]. The model places probability mass on impossible values
-(e.g., N(0.04, 0.05) puts ~21% of mass below zero for dup_ratio). In practice
-this doesn't break ranking — the LLR formula only evaluates at observed valid
-values — but absolute LLR magnitudes are slightly off. A beta distribution
-would be more appropriate but adds complexity not worth it for guessed constants.
-
-**Honest question about the framework:** with guessed constants, a simple
-threshold counter (count how many signals exceed fixed thresholds → score 0-N)
-might produce MORE reliable rankings. Simple thresholds are robust to
-miscalibrated constants because they're binary. The Bayesian formula amplifies
-small measurement differences through Gaussian tails, which is powerful when
-constants are right but misleading when wrong. The four binary signals (narration,
-decay, overwrap, naming break) partially address this — they function like
-threshold counters within the Bayesian framework. The real value of the full
-Bayesian approach with Gaussian signals emerges AFTER calibration.
+**What this tool is NOT:**
+- Not an AI authorship detector. The slop score measures code quality patterns,
+  not who wrote the code. High-quality code from any source (human or AI)
+  will score low; sloppy code from any source will score high.
+- Not a replacement for language-specific linters (eslint, clippy, ruff).
+  slop catches patterns they miss; they catch patterns slop misses. Use both.
 
 **Known limitations:**
 - Short files (< 50 lines) lack data for most signals
-- Test files produce false positives (repetitive by nature, legitimate step narration)
-- Mixed-authorship files score in the middle — can't distinguish "50% confident it's all AI" from "certain that 50% is AI"
-- Formatters reduce Group A (regularity) and Group J (indentation) signal strength
-- Token diversity (TTR) is a weak signal — C/Go code naturally has low TTR, overlapping with AI values
-- Adversarial evasion is possible via prompt engineering
-- Signal shelf life: as AI improves, patterns will change; marker lists and constants should be updated periodically
+- Test files may score higher (repetitive by nature, legitimate step narration)
+- Formatters (prettier, black, gofmt) reduce regularity and indentation signals
+- Token diversity (TTR) is a weak signal — C/Go code naturally has low TTR
+- Default Gaussian parameters are educated guesses; override via
+  `.slop-calibration.json` with empirical values for your codebase
+- The Gaussian model is technically wrong for bounded signals (CCR, regularity),
+  but ranking is preserved and LLR clamping limits the impact
 
 ## Project Structure
 
@@ -1640,7 +1511,7 @@ src/
   main.c           CLI entry point, arg parsing, output formatting (1435 lines)
   scan.c           Single-pass scanner, TTR hash set, indent tracking (933 lines)
   smell.c          Smell detectors: diagnostic + correlated + general (1033 lines)
-  score.c          Bayesian LLR scoring, temperature scaling, calibration I/O (527 lines)
+  score.c          Bayesian LLR scoring, temperature scaling, calibration loading (527 lines)
   compress.c       Deflate wrapper, compression ratio, NCD (48 lines)
   dupes.c          Cross-file duplicate detection, union-find clustering (151 lines)
   git.c            Git commit feature extraction via popen (93 lines)
@@ -1662,7 +1533,7 @@ packaging/
   ci.yml           PR checks: build + test
 
 tests/
-  run.sh           Integration test harness (85 tests, 332 lines)
+  run.sh           Integration test harness (86 tests, 332 lines)
   fixtures/        Test input files (AI example, human example, dupes, Go errors)
 
 examples/

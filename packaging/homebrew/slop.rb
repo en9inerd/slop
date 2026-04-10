@@ -1,5 +1,5 @@
 class Slop < Formula
-  desc "AI slop detector — finds AI-typical code defects using information theory"
+  desc "Code quality scanner — catches patterns linters miss"
   homepage "https://github.com/en9inerd/slop"
   license "MIT"
   version "VERSION_PLACEHOLDER"

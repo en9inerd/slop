@@ -511,7 +511,55 @@ static void scan_finalize(ScanResult *res, const char *content, size_t len,
   }
 }
 
-/* ── Main scanner ───────────────────────────────────────── */
+/* ── Narration check (called once per comment line) ────── */
+
+static void check_narration_comment(ScanResult *res, const char *cmnt_buf,
+                                    int cmnt_len, int line_num,
+                                    const char *content, size_t line_start,
+                                    int ll) {
+  int ci = 0;
+  while (ci < cmnt_len && isspace((unsigned char)cmnt_buf[ci]))
+    ci++;
+  int tl = cmnt_len - ci;
+  for (int m = 0; narration_markers[m]; m++) {
+    if (starts_with_ci(cmnt_buf + ci, tl, narration_markers[m])) {
+      if (res->narration_count < MAX_NARRATION) {
+        NarrationHit *h = &res->narration[res->narration_count++];
+        h->line = line_num;
+        int cp = ll;
+        if (cp >= (int)sizeof(h->text))
+          cp = (int)sizeof(h->text) - 1;
+        memcpy(h->text, content + line_start, (size_t)cp);
+        h->text[cp] = '\0';
+      }
+      return;
+    }
+  }
+}
+
+static void check_defect_markers(const char *cmnt_buf, int cmnt_len,
+                                 int *defect_buf, int *defect_n, int max_lines,
+                                 int line_num) {
+  for (int j = 0; j < cmnt_len - 3; j++) {
+    if (starts_with_ci(cmnt_buf + j, cmnt_len - j, "todo") ||
+        starts_with_ci(cmnt_buf + j, cmnt_len - j, "fixme")) {
+      if (*defect_n < max_lines)
+        defect_buf[(*defect_n)++] = line_num;
+      return;
+    }
+  }
+}
+
+/* ── Main scanner ──────────────────────────────────────────
+ *
+ * Single-pass character-by-character scanner. Structure:
+ *   1. Byte-kind map (code/comment/string per offset)
+ *   2. Main loop:
+ *      a. Newline → classify line, record metrics, detect functions
+ *      b. State machine (code / line-comment / block-comment / string)
+ *      c. In code: brace tracking, function detection, identifier extraction
+ *   3. Finalize (line counts, comment gradient, defect quartiles)
+ */
 
 void scan_file(ScanResult *res, const char *filename, const char *content,
                size_t len, LangFamily lang) {
@@ -577,7 +625,7 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
   for (size_t i = 0; i <= len; i++) {
     char c = (i < len) ? content[i] : '\n';
 
-    /* ── newline: finalise line ─────────────────────── */
+    /* ── (a) Newline: classify line, record metrics ─── */
     if (c == '\n') {
       int ll = (int)(i - line_start);
 
@@ -608,43 +656,17 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
       }
 
       if (cmnt_len > 0) {
-        int ci = 0;
-        while (ci < cmnt_len && isspace((unsigned char)cmnt_buf[ci]))
-          ci++;
-        int tl = cmnt_len - ci;
-        for (int m = 0; narration_markers[m]; m++) {
-          if (starts_with_ci(cmnt_buf + ci, tl, narration_markers[m])) {
-            if (res->narration_count < MAX_NARRATION) {
-              NarrationHit *h = &res->narration[res->narration_count++];
-              h->line = line_num;
-              int cp = ll;
-              if (cp >= (int)sizeof(h->text))
-                cp = (int)sizeof(h->text) - 1;
-              memcpy(h->text, content + line_start, (size_t)cp);
-              h->text[cp] = '\0';
-            }
-            break;
-          }
-        }
-
-        /* TODO / FIXME detection in comment text */
-        for (int j = 0; j < cmnt_len - 3; j++) {
-          if (starts_with_ci(cmnt_buf + j, cmnt_len - j, "todo") ||
-              starts_with_ci(cmnt_buf + j, cmnt_len - j, "fixme")) {
-            if (defect_n < max_lines)
-              defect_buf[defect_n++] = line_num;
-            break;
-          }
-        }
+        check_narration_comment(res, cmnt_buf, cmnt_len, line_num, content,
+                                line_start, ll);
+        check_defect_markers(cmnt_buf, cmnt_len, defect_buf, &defect_n,
+                             max_lines, line_num);
       }
 
-      /* store prev line for C-like function detection (only code lines) */
       if (line_has_code && ll < (int)sizeof(prev_line)) {
         memcpy(prev_line, content + line_start, (size_t)ll);
         prev_line_len = ll;
       }
 
-      /* track code in current block (empty catch detection) */
       if (bstack_top > 0 && line_has_code)
         bstack[bstack_top - 1].code_lines++;
 
@@ -663,7 +685,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         }
       }
 
-      /* Python: detect new def */
       if (lang == LANG_PYTHON && !first_nonws_cmnt) {
         int pyi = 0;
         if (py_is_def_line(content + line_start, ll, &pyi)) {
@@ -695,7 +716,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         }
       }
 
-      /* Shell: detect function lines */
       if (lang == LANG_SHELL && !first_nonws_cmnt) {
         if (sh_is_func_line(content + line_start, ll)) {
           if (!found_body) {
@@ -705,7 +725,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         }
       }
 
-      /* reset per-line */
       line_num++;
       line_start = i + 1;
       line_has_nonws = false;
@@ -717,14 +736,14 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
       continue;
     }
 
-    /* ── block-comment line start detection ─────────── */
+    /* ── (b) Block-comment line-start detection ─────── */
     if (!line_has_nonws && !isspace((unsigned char)c) &&
         state == ST_BLOCK_COMMENT) {
       first_nonws_cmnt = true;
       line_has_nonws = true;
     }
 
-    /* ── state machine ──────────────────────────────── */
+    /* ── (c) State machine ─────────────────────────── */
     switch (state) {
     case ST_CODE: {
       if (isspace((unsigned char)c))
@@ -789,14 +808,12 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         continue;
       }
 
-      /* backtick template literals (JS/TS) */
       if (c == '`' && lang == LANG_C_LIKE) {
         str_quote = '`';
         state = ST_STRING;
         continue;
       }
 
-      /* inline comment (not first token on line) */
       if (lang == LANG_C_LIKE && c == '/' && i + 1 < len) {
         if (content[i + 1] == '/') {
           state = ST_LINE_COMMENT;
@@ -814,7 +831,7 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         continue;
       }
 
-      /* ── C-like brace tracking & function detection ── */
+      /* ── (c.1) C-like brace tracking & function detection */
       if (lang == LANG_C_LIKE) {
         if (c == '{') {
           /*
@@ -921,17 +938,14 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
         }
       }
 
-      /* ── keyword / identifier extraction ──────────── */
+      /* ── (c.2) Keyword / identifier extraction ─────── */
       if (isalpha((unsigned char)c) || c == '_') {
         int wlen = extract_word(content + i, content + len, word, sizeof(word));
         if (wlen > 0) {
-          /* conditional keywords */
           if ((strcmp(word, "if") == 0) || (strcmp(word, "else") == 0) ||
               (strcmp(word, "elif") == 0) || (strcmp(word, "switch") == 0) ||
               (strcmp(word, "case") == 0) || (strcmp(word, "match") == 0))
             res->conditional_count++;
-
-          /* try/catch/except → pending block type */
           if (strcmp(word, "try") == 0)
             pending_blk = BLK_TRY;
           else if (strcmp(word, "catch") == 0 || strcmp(word, "except") == 0) {
@@ -945,8 +959,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
                 defect_buf[defect_n++] = line_num;
             }
           }
-
-          /* naming convention tracking inside functions */
           if (in_func && !is_keyword(word) && !is_all_upper(word, wlen)) {
             if (is_camel_case(word, wlen))
               func_camel++;
@@ -994,7 +1006,6 @@ void scan_file(ScanResult *res, const char *filename, const char *content,
     }
   }
 
-  /* close any open Python function */
   if (lang == LANG_PYTHON && in_func) {
     FuncCloseCtx fcc = {res,         &in_func,        &func_camel,
                         &func_snake, func_start_line, cur_func_name,

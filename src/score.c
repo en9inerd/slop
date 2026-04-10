@@ -4,6 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Code quality score: sum of per-signal log-likelihood ratios (LLR), then
+ * slop = sigmoid(sum / temperature) * 10. Signal inventory and overlap notes:
+ * see METRICS.md at repo root. Pipeline below matches that document in order.
+ */
+
 /* ── Calibration defaults ───────────────────────────────────── */
 
 void calibration_default(Calibration *cal) {
@@ -115,9 +121,8 @@ bool calibration_load(Calibration *cal, const char *dir) {
 
   /*
    * Validate: parse into zeroed tmp, so unfilled fields remain 0.
-   * A signal is "present" only if both sigmas were actually parsed
-   * with non-trivial values. Require at least 3 of 5 Gaussian
-   * signals to be valid — otherwise the file is malformed.
+   * Count Gaussian blocks with both sigmas parsed; require at least 3 valid
+   * or the file is treated as malformed.
    */
   int valid_signals = 0;
   GaussParam *gps[] = {&tmp.regularity, &tmp.ccr, &tmp.cond,
@@ -145,64 +150,6 @@ bool calibration_load(Calibration *cal, const char *dir) {
 
   tmp.loaded = true;
   *cal = tmp;
-  return true;
-}
-
-static void write_gp(FILE *fp, const char *name, const GaussParam *g) {
-  fprintf(fp,
-          "    \"%s\": { \"mu_ai\": %.6f, \"sigma_ai\": %.6f, "
-          "\"mu_h\": %.6f, \"sigma_h\": %.6f }",
-          name, g->mu_ai, g->sig_ai, g->mu_h, g->sig_h);
-}
-
-bool calibration_save(const Calibration *cal, const char *dir) {
-  char path[4096];
-  snprintf(path, sizeof(path), "%s/.slop-calibration.json", dir);
-
-  FILE *f = fopen(path, "w");
-  if (!f)
-    return false;
-
-  fprintf(f, "{\n");
-  fprintf(f, "  \"version\": 1,\n");
-  fprintf(f, "  \"temperature\": %.6f,\n", cal->temperature);
-  fprintf(f, "  \"signals\": {\n");
-
-  write_gp(f, "regularity", &cal->regularity);
-  fprintf(f, ",\n");
-  write_gp(f, "ccr", &cal->ccr);
-  fprintf(f, ",\n");
-  write_gp(f, "cond", &cal->cond);
-  fprintf(f, ",\n");
-  write_gp(f, "dup", &cal->dup);
-  fprintf(f, ",\n");
-  write_gp(f, "git", &cal->git);
-  fprintf(f, ",\n");
-  write_gp(f, "ident", &cal->ident);
-  fprintf(f, ",\n");
-  write_gp(f, "func_cv", &cal->func_cv);
-  fprintf(f, ",\n");
-  write_gp(f, "ttr", &cal->ttr);
-  fprintf(f, ",\n");
-  write_gp(f, "indent", &cal->indent);
-  fprintf(f, "\n");
-
-  fprintf(f, "  },\n");
-  fprintf(f, "  \"binary\": {\n");
-  fprintf(f, "    \"narration\": { \"p_ai\": %.6f, \"p_h\": %.6f },\n",
-          cal->narr_p_ai, cal->narr_p_h);
-  fprintf(f, "    \"decay\": { \"p_ai\": %.6f, \"p_h\": %.6f }\n",
-          cal->decay_p_ai, cal->decay_p_h);
-  fprintf(f, "  },\n");
-  fprintf(f, "  \"patterns\": {\n");
-  fprintf(f, "    \"overwrap\": { \"p_ai\": %.6f, \"p_h\": %.6f },\n",
-          cal->overwrap_p_ai, cal->overwrap_p_h);
-  fprintf(f, "    \"namebreak\": { \"p_ai\": %.6f, \"p_h\": %.6f }\n",
-          cal->namebrk_p_ai, cal->namebrk_p_h);
-  fprintf(f, "  }\n");
-  fprintf(f, "}\n");
-
-  fclose(f);
   return true;
 }
 
@@ -380,28 +327,12 @@ static bool detect_decay(const ScanResult *scan) {
   return false;
 }
 
-/* ── Score computation ──────────────────────────────────── */
-
-void score_compute(ScoreResult *out, const ScanResult *scan,
-                   const Calibration *cal, double compression_ratio,
-                   double dup_ratio, const GitFeatures *git) {
-  *out = (ScoreResult){};
-  out->temperature = cal->temperature;
-  out->m_dup_ratio = dup_ratio;
-  out->m_git_composite = (git && git->available) ? git->composite : -1;
-
-  if (scan->code_lines == 0) {
-    out->probability = DEFAULT_PRIOR;
-    add_detail(out, "—", "insufficient code", "0 lines", 0);
-    return;
-  }
-
-  const int code = scan->code_lines;
-  double S = 0;
+/* Comment ratio, narration tier, conditional keyword density. */
+static double accum_comment_signals(ScoreResult *out, const ScanResult *scan,
+                                    const Calibration *cal, int code,
+                                    double clamp) {
   char mbuf[48];
-  const double clamp = cal->loaded ? LLR_CLAMP : LLR_CLAMP_UNCAL;
-
-  S += score_regularity(out, scan, cal, compression_ratio, clamp);
+  double S = 0;
 
   const double ccr = (double)scan->comment_lines / code;
   out->m_ccr = ccr;
@@ -435,8 +366,20 @@ void score_compute(ScoreResult *out, const ScanResult *scan,
   add_detail(out, "structure", "conditional dens.", mbuf, llr);
   S += llr;
 
+  return S;
+}
+
+/* Defect trend by file region, defensive checks, mixed naming style. */
+static double accum_position_and_patterns(ScoreResult *out,
+                                          const ScanResult *scan,
+                                          const Calibration *cal,
+                                          double clamp) {
+  char mbuf[48];
+  double S = 0;
+
   const bool decay = detect_decay(scan);
   out->m_decay = decay;
+  double llr;
   if (scan->total_lines < MIN_LINES_DECAY) {
     llr = 0;
     snprintf(mbuf, sizeof(mbuf), "n/a (<%d lines)", MIN_LINES_DECAY);
@@ -469,7 +412,16 @@ void score_compute(ScoreResult *out, const ScanResult *scan,
   add_detail(out, "patterns", "naming breaks", mbuf, llr);
   S += llr;
 
-  /* identifier specificity: generic_names / total identifiers */
+  return S;
+}
+
+/* Identifier genericity, function-size spread, token reuse, indent CV. */
+static double accum_naming_and_layout(ScoreResult *out, const ScanResult *scan,
+                                     const Calibration *cal, double clamp) {
+  char mbuf[48];
+  double S = 0;
+  double llr;
+
   if (scan->total_identifiers >= MIN_IDENTIFIERS) {
     double ispec = (double)scan->generic_identifiers / scan->total_identifiers;
     out->m_ident_spec = ispec;
@@ -484,7 +436,6 @@ void score_compute(ScoreResult *out, const ScanResult *scan,
   add_detail(out, "naming", "ident. specificity", mbuf, llr);
   S += llr;
 
-  /* function length CV: stdev(line counts) / mean(line counts) */
   if (scan->function_count >= MIN_FUNCS_CV) {
     double sum = 0, sum2 = 0;
     int nf = 0;
@@ -520,7 +471,6 @@ void score_compute(ScoreResult *out, const ScanResult *scan,
   add_detail(out, "structure", "func length CV", mbuf, llr);
   S += llr;
 
-  /* token diversity: unique / total identifiers */
   if (scan->total_identifiers >= MIN_TTR_TOKENS) {
     double ttr = (double)scan->unique_identifiers / scan->total_identifiers;
     out->m_ttr = ttr;
@@ -535,7 +485,6 @@ void score_compute(ScoreResult *out, const ScanResult *scan,
   add_detail(out, "naming", "token diversity", mbuf, llr);
   S += llr;
 
-  /* indentation regularity: CV of leading-whitespace depths */
   if (scan->indent_count >= MIN_INDENT_LINES) {
     double sum = 0, sum2 = 0;
     for (int k = 0; k < scan->indent_count; k++) {
@@ -559,19 +508,54 @@ void score_compute(ScoreResult *out, const ScanResult *scan,
   add_detail(out, "whitespace", "indent regularity", mbuf, llr);
   S += llr;
 
+  return S;
+}
+
+static double accum_project_signals(ScoreResult *out, const Calibration *cal,
+                                    double dup_ratio, const GitFeatures *git,
+                                    double clamp) {
+  char mbuf[48];
+  double S = 0;
+
   if (dup_ratio >= 0) {
-    llr = gaussian_llr(dup_ratio, &cal->dup, clamp);
+    double llr = gaussian_llr(dup_ratio, &cal->dup, clamp);
     snprintf(mbuf, sizeof(mbuf), "%.2f", dup_ratio);
     add_detail(out, "dupes", "duplicate ratio", mbuf, llr);
     S += llr;
   }
 
   if (git && git->available) {
-    llr = gaussian_llr(git->composite, &cal->git, clamp);
+    double llr = gaussian_llr(git->composite, &cal->git, clamp);
     snprintf(mbuf, sizeof(mbuf), "%.2f", git->composite);
     add_detail(out, "git", "commit style", mbuf, llr);
     S += llr;
   }
+
+  return S;
+}
+
+void score_compute(ScoreResult *out, const ScanResult *scan,
+                   const Calibration *cal, double compression_ratio,
+                   double dup_ratio, const GitFeatures *git) {
+  *out = (ScoreResult){};
+  out->temperature = cal->temperature;
+  out->m_dup_ratio = dup_ratio;
+  out->m_git_composite = (git && git->available) ? git->composite : -1;
+
+  if (scan->code_lines == 0) {
+    out->probability = DEFAULT_PRIOR;
+    add_detail(out, "score", "insufficient code", "0 code lines", 0);
+    return;
+  }
+
+  const int code = scan->code_lines;
+  const double clamp = cal->loaded ? LLR_CLAMP : LLR_CLAMP_UNCAL;
+
+  double S = score_regularity(out, scan, cal, compression_ratio, clamp);
+  S += accum_comment_signals(out, scan, cal, code, clamp);
+  S += accum_position_and_patterns(out, scan, cal, clamp);
+  S += accum_naming_and_layout(out, scan, cal, clamp);
+  S += accum_project_signals(out, cal, dup_ratio, git, clamp);
 
   out->raw_score = S;
   out->probability = slop_sigmoid(S / cal->temperature);
