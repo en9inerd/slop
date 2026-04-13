@@ -56,7 +56,10 @@ void dupes_add_file(DupeResult *dr, const char *filepath, const char *content,
 
     if (dr->func_count >= dr->func_cap) {
       dr->func_cap *= 2;
-      dr->funcs = realloc(dr->funcs, (size_t)dr->func_cap * sizeof(DupeFunc));
+      DupeFunc *tmp = realloc(dr->funcs, (size_t)dr->func_cap * sizeof(DupeFunc));
+      if (!tmp)
+        return;
+      dr->funcs = tmp;
     }
 
     DupeFunc *df = &dr->funcs[dr->func_count++];
@@ -105,8 +108,10 @@ void dupes_compute(DupeResult *dr, double threshold) {
       if (ncd < threshold) {
         if (dr->pair_count >= dr->pair_cap) {
           dr->pair_cap *= 2;
-          dr->pairs =
-              realloc(dr->pairs, (size_t)dr->pair_cap * sizeof(DupePair));
+          DupePair *tmp = realloc(dr->pairs, (size_t)dr->pair_cap * sizeof(DupePair));
+          if (!tmp)
+            return;
+          dr->pairs = tmp;
         }
         DupePair *p = &dr->pairs[dr->pair_count++];
         p->a = i;

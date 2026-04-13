@@ -87,7 +87,10 @@ void fl_init(FileList *fl) {
 void fl_add(FileList *fl, const char *path) {
   if (fl->count >= fl->cap) {
     fl->cap *= 2;
-    fl->paths = realloc(fl->paths, (size_t)fl->cap * sizeof(char *));
+    char **tmp = realloc(fl->paths, (size_t)fl->cap * sizeof(char *));
+    if (!tmp)
+      return;
+    fl->paths = tmp;
   }
   fl->paths[fl->count++] = strdup(path);
 }

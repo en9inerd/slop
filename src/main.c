@@ -330,7 +330,13 @@ static int cmd_scan_stdin(int argc, char **argv) {
     len += n;
     if (len >= cap) {
       cap *= 2;
-      buf = realloc(buf, cap);
+      char *tmp = realloc(buf, cap);
+      if (!tmp) {
+        free(buf);
+        fprintf(stderr, "slop: out of memory\n");
+        return 1;
+      }
+      buf = tmp;
     }
   }
   buf[len] = '\0';
