@@ -1,6 +1,6 @@
 # slop
 
-Code quality scanner. Catches stuff linters miss — narration comments,
+Code quality scanner. Catches stuff linters miss - narration comments,
 dead code, naming drift, cross-file duplicates, comment density decay.
 
 No ML, no API calls, no cloud. Single static binary. C23, built with Zig.
@@ -34,11 +34,11 @@ slop report ./src/              # full report with methodology
 
 ## What it finds
 
-**`slop check`** — pattern-based findings at three severity levels:
+**`slop check`** - pattern-based findings at three severity levels:
 
 *Strong tells* (near-zero false positive rate):
-- Narration comments — "First we...", "Now we...", "Step 1:..."
-- Comment density gradient — 3x+ drop between first and second half
+- Narration comments - "First we...", "Now we...", "Step 1:..."
+- Comment density gradient - 3x+ drop between first and second half
 
 *Score-related:*
 - Redundant re-implementation (NCD < 0.30 within same file)
@@ -50,17 +50,17 @@ slop report ./src/              # full report with methodology
 
 *General* (behind `--all`):
 - Zombie parameters, unused imports, magic string repetition
-- Dead code — language-aware: respects Go uppercase exports, TS/JS
+- Dead code - language-aware: respects Go uppercase exports, TS/JS
   `export`, C `static` linkage, Python `_` prefix, decorators, common
   entry points (`main`, `init`, `Test*`, `Benchmark*`, lifecycle hooks)
 
-**`slop scan`** — Bayesian log-likelihood scoring across 13 signals
+**`slop scan`** - Bayesian log-likelihood scoring across 13 signals
 (regularity, comment ratio, narration, conditional density, quality decay,
 over-wrapping, naming breaks, identifier specificity, function length CV,
 token diversity, indentation regularity, dupes, git). See
 [METRICS.md](METRICS.md) for the math.
 
-**`slop dupes`** — NCD-based duplicate function detection across a
+**`slop dupes`** - NCD-based duplicate function detection across a
 project. Threshold 0.30, min body 200 bytes, union-find clustering.
 
 ## Flags
@@ -143,15 +143,15 @@ for the full parameter reference and calibration file format.
 
 Treat the slop score as a **ranking**, not a calibrated probability.
 `slop check` and `slop dupes` are deterministic (pattern matching / NCD).
-`slop scan` scoring is directional — 5.8 vs 6.2 is noise.
+`slop scan` scoring is directional - 5.8 vs 6.2 is noise.
 
 ## Limitations
 
 - Short files (< 50 lines) lack data for most signals
 - Test files may score higher (repetitive structure, step-style comments)
 - Formatters (prettier, gofmt) reduce regularity/indentation signals
-- Default Gaussian parameters are guesses — tune for your codebase
-- Not an authorship detector — measures code quality patterns, not origin
+- Default Gaussian parameters are guesses - tune for your codebase
+- Not an authorship detector - measures code quality patterns, not origin
 
 ## Project layout
 

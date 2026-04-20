@@ -1,6 +1,6 @@
 #!/bin/bash
 # Updates the Homebrew tap formula with a new version and SHA256 checksums.
-# Reads binaries from a local dist directory — works in CI and locally.
+# Reads binaries from a local dist directory - works in CI and locally.
 #
 # Usage: update-homebrew.sh <version> <dist_dir> <tap_repo_url>
 #

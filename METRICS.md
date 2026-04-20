@@ -42,7 +42,7 @@ LLR clamping prevents any single signal from dominating:
 | No compression | ±1.5 | File < 500 bytes |
 | Small file | ±1.0 | File < 50 lines |
 
-The default ±1.5 is conservative — all μ/σ/p values are educated guesses,
+The default ±1.5 is conservative - all μ/σ/p values are educated guesses,
 so clamping prevents a mis-estimated signal from producing extreme scores.
 
 ### Temperature scaling
@@ -76,7 +76,7 @@ but our signals are correlated, so T compensates.
 | Dupes | Gaussian | Duplicate function ratio (directory mode only) |
 | Git | Gaussian | Commit message patterns (opt-in `--git`) |
 
-### Group A — Regularity
+### Group A - Regularity
 
 Three measurements normalized to [0,1] and averaged:
 
@@ -87,73 +87,73 @@ c_norm = 1 − clamp((line_cv − 0.15) / 0.75, 0, 1)
 regularity = (r_norm + h_norm + c_norm) / 3
 ```
 
-Weakest group — formatters homogenize code and narrow the gap.
+Weakest group - formatters homogenize code and narrow the gap.
 
-### Group B1 — Comment ratio
+### Group B1 - Comment ratio
 
 `CCR = comment_lines / max(code_lines, 1)`
 
 Trailing comments (`x = 5 // init`) count as code. If `code_lines = 0`,
 all signals are skipped ("insufficient code").
 
-### Group B2 — Narration
+### Group B2 - Narration
 
 `has_narration = 1 if count ≥ 3`
 
 Count-based, not ratio-based. Strongest single signal (discrimination 40x).
 
-### Group C — Conditional density
+### Group C - Conditional density
 
 `CD = count(if, else, elif, switch, case, match) / code_lines`
 
 Skipped if < 3 keywords. Wide σ reflects language dependence.
 
-### Group D — Positional quality
+### Group D - Positional quality
 
 For files ≥ 60 lines. Spearman ρ on defect rate across 4 quartiles,
 OR comment gradient > 3x between halves.
 
-### Groups D2/D3 — Over-wrapping, Naming break
+### Groups D2/D3 - Over-wrapping, Naming break
 
 Pattern-based binary signals. Less sensitive to parameter tuning.
 
-### Group G — Identifier specificity
+### Group G - Identifier specificity
 
 `ident_spec = generic_identifiers / total_identifiers`
 
 38-word dictionary (data, result, response, handler, value, etc.).
 Skipped if < 20 identifiers.
 
-### Group H — Function length CV
+### Group H - Function length CV
 
 `CV = stdev(func_lengths) / mean(func_lengths)`
 
 Sloppy code tends toward uniform function sizes. Skipped if < 5 functions.
 
-### Group I — Token diversity (TTR)
+### Group I - Token diversity (TTR)
 
 `TTR = unique_identifiers / total_identifiers`
 
-Tracked via FNV-1a hash set (2048 buckets). Deliberately weak signal —
+Tracked via FNV-1a hash set (2048 buckets). Deliberately weak signal -
 C/Go code naturally has low TTR.
 
-### Group J — Indentation regularity
+### Group J - Indentation regularity
 
 `indent_cv = stdev(leading_spaces) / mean(leading_spaces)`
 
 Validated by Nirob et al. 2025 as the #1 whitespace discriminator.
 Tabs = 4 spaces. Skipped if < 15 code lines.
 
-### Group E — Duplicate ratio (directory mode only)
+### Group E - Duplicate ratio (directory mode only)
 
 `dup_ratio = |{funcs with NCD < 0.3 match}| / |{all funcs}|`
 
 Skipped for single-file scans.
 
-### Group F — Git patterns (opt-in)
+### Group F - Git patterns (opt-in)
 
 Disabled by default. Git commits describe the *committer*, not the *code
-author* — produces false negatives when humans commit AI code.
+author* - produces false negatives when humans commit AI code.
 
 ## NCD (duplicate detection)
 

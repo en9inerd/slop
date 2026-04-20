@@ -15,7 +15,7 @@ static double report_single_file(const char *path, const Calibration *cal,
     return -1;
   }
   if (util_should_skip(content, len)) {
-    printf("  %s — skipped (binary/minified/generated)\n", path);
+    printf("  %s - skipped (binary/minified/generated)\n", path);
     free(content);
     return -1;
   }
@@ -223,7 +223,7 @@ int cmd_report(int argc, char **argv) {
           for (int s = 0; s < smell.count; s++) {
             const SmellFinding *f = &smell.items[s];
             if (f->line > 0)
-              printf("      [%s] line %d: %s — %s\n", severity_str(f->severity),
+              printf("      [%s] line %d: %s - %s\n", severity_str(f->severity),
                      f->line, smell_kind_str(f->kind), f->message);
           }
         }

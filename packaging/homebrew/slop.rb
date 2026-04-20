@@ -1,5 +1,5 @@
 class Slop < Formula
-  desc "Code quality scanner — catches patterns linters miss"
+  desc "Code quality scanner - catches patterns linters miss"
   homepage "https://github.com/en9inerd/slop"
   license "MIT"
   version "VERSION_PLACEHOLDER"

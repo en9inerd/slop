@@ -7,7 +7,7 @@ PASS=0
 FAIL=0
 
 pass() { PASS=$((PASS + 1)); printf "  \033[32mPASS\033[0m %s\n" "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf "  \033[31mFAIL\033[0m %s — %s\n" "$1" "$2"; }
+fail() { FAIL=$((FAIL + 1)); printf "  \033[31mFAIL\033[0m %s - %s\n" "$1" "$2"; }
 
 OUT=/tmp/slop_test_out
 LAST_EXIT=0

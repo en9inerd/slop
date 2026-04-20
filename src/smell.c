@@ -272,7 +272,7 @@ static void detect_as_any(SmellReport *r, const ScanResult *s) {
         first_line = line;
       if (count <= 3)
         add_finding(r, SMELL_AS_ANY, SEV_CORRELATED, line,
-                    "\"as any\" type cast — loses type safety");
+                    "\"as any\" type cast - loses type safety");
     }
   }
   if (count > 3)
@@ -304,13 +304,13 @@ static void detect_ts_directives(SmellReport *r, const ScanResult *s) {
 
     if (memcmp(p + i, "@ts-ignore", 10) == 0) {
       add_finding(r, SMELL_TS_DIRECTIVE, SEV_CORRELATED, line,
-                  "@ts-ignore — suppresses type checking");
+                  "@ts-ignore - suppresses type checking");
     } else if (i + 11 < len && memcmp(p + i, "@ts-nocheck", 11) == 0) {
       add_finding(r, SMELL_TS_DIRECTIVE, SEV_CORRELATED, line,
-                  "@ts-nocheck — disables type checking for entire file");
+                  "@ts-nocheck - disables type checking for entire file");
     } else if (i + 16 <= len && memcmp(p + i, "@ts-expect-error", 16) == 0) {
       add_finding(r, SMELL_TS_DIRECTIVE, SEV_CORRELATED, line,
-                  "@ts-expect-error — suppresses type error");
+                  "@ts-expect-error - suppresses type error");
     }
   }
 }
@@ -341,7 +341,7 @@ static void detect_py_directives(SmellReport *r, const ScanResult *s) {
         first_line = line;
       if (count <= 3)
         add_finding(r, SMELL_TS_DIRECTIVE, SEV_CORRELATED, line,
-                    "type: ignore — suppresses type checking");
+                    "type: ignore - suppresses type checking");
     } else if (i + 4 <= len && memcmp(p + i, "noqa", 4) == 0 &&
                (i + 4 >= len || !isalnum((unsigned char)p[i + 4]))) {
       count++;
@@ -349,7 +349,7 @@ static void detect_py_directives(SmellReport *r, const ScanResult *s) {
         first_line = line;
       if (count <= 3)
         add_finding(r, SMELL_TS_DIRECTIVE, SEV_CORRELATED, line,
-                    "noqa — suppresses linter warning");
+                    "noqa - suppresses linter warning");
     }
   }
   if (count > 3)

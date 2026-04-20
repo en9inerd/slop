@@ -270,7 +270,7 @@ static int cmd_scan(int argc, char **argv) {
       return 1;
     }
     if (util_should_skip(content, len)) {
-      printf("\n  %s — skipped (binary/minified/generated)\n\n", target);
+      printf("\n  %s - skipped (binary/minified/generated)\n\n", target);
       free(content);
       return 0;
     }

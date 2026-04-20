@@ -3,7 +3,7 @@ set -euo pipefail
 
 DIST_DIR="dist"
 VERSION=${VERSION:-dev}
-DESCRIPTION="AI slop detector — finds AI-typical code defects using information theory"
+DESCRIPTION="AI slop detector - finds AI-typical code defects using information theory"
 MAINTAINER="en9inerd"
 URL="https://github.com/en9inerd/slop"
 
