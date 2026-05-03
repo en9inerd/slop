@@ -111,14 +111,12 @@ static int extract_params(const char *content, const FuncInfo *fi,
         }
       }
 
-      if (nlen > 0) {
-        if (spec == SPECIFIC_PYTHON &&
-            (strcmp(name, "self") == 0 || strcmp(name, "cls") == 0)) {
-        } else if (is_keyword_param(name)) {
-        } else if (count < max_params) {
-          memcpy(params[count], name, (size_t)nlen + 1);
-          count++;
-        }
+      if (nlen > 0 &&
+          !(spec == SPECIFIC_PYTHON &&
+            (strcmp(name, "self") == 0 || strcmp(name, "cls") == 0)) &&
+          !is_keyword_param(name) && count < max_params) {
+        memcpy(params[count], name, (size_t)nlen + 1);
+        count++;
       }
       seg_start = i + 1;
     }

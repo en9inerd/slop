@@ -42,8 +42,8 @@ static void detect_comment_gradient(SmellReport *r, const ScanResult *s) {
   if (!has_comment_gradient(s->body_lines_top, s->body_comment_top,
                             s->body_lines_bottom, s->body_comment_bottom))
     return;
-  double d_top = (double)s->body_comment_top / (double)s->body_lines_top;
-  double d_bot = (double)s->body_comment_bottom / (double)s->body_lines_bottom;
+  double d_top = s->body_comment_top / (double)s->body_lines_top;
+  double d_bot = s->body_comment_bottom / (double)s->body_lines_bottom;
   if (d_bot < 0.001)
     d_bot = 0.001;
   int pct_top = (int)(d_top * 100 + 0.5);

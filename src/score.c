@@ -52,10 +52,9 @@ static void rank4(const double v[4], double r[4]) {
 static double spearman4(const double vals[4]) {
   double ranks[4];
   rank4(vals, ranks);
-  double pos[4] = {1, 2, 3, 4};
   double sum_d2 = 0;
   for (int i = 0; i < 4; i++) {
-    double d = pos[i] - ranks[i];
+    double d = (double)(i + 1) - ranks[i];
     sum_d2 += d * d;
   }
   return 1.0 - 6.0 * sum_d2 / 60.0;
